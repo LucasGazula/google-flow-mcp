@@ -19,3 +19,5 @@ cookies*.json
 # Sondagens locais de validação não fazem parte do servidor.
 .probe_*.py
 .validate_*.py
+keepalive-state.json
+keepalive-state.lock

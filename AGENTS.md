@@ -1,5 +1,53 @@
 # Google Flow MCP — instruções do projeto
 
+## Regras fixas
+
+- **Sempre responder em português do Brasil**, mesmo quando o usuário escrever em
+  outro idioma.
+- **Continuidade entre agentes/sessões via AI Memory** (`workspace=google_flow_mcp`,
+  `project=google_flow_mcp`): no início, ler `memory_recent`, a página
+  `projeto/em-andamento.md` e `projeto/estado-atual.md`. **Durante e ao fim** de
+  cada etapa, atualizar `projeto/em-andamento.md` (o que está sendo feito agora,
+  próximo passo, bloqueios) e, quando algo for concluído, `projeto/estado-atual.md`.
+  Outro agente deve conseguir retomar só lendo essas páginas. Nunca gravar
+  cookies, tokens, respostas autenticadas ou URLs assinadas.
+- Gastar créditos só com conta confirmada pelo usuário (e-mail, saldo e cotação).
+
+## Visão geral
+
+MCP `stdio` (Python 3.11+, `uv`, `gflow-cli==0.79.1`) que expõe o Google Flow
+(vídeo, imagem, cenas, personagens, Agent) a agentes, usando as contas e os
+créditos de assinatura do usuário. Arquitetura: um worker por conta mantém um
+Chrome headless autenticado só para preparar sessão/reCAPTCHA pelo fluxo normal
+do site; o envio real é um único POST HTTP com os RPCs nativos do Flow. Mutações
+incertas nunca são reenviadas; tarefas ficam persistidas e são recuperáveis.
+
+| Arquivo | Papel |
+| --- | --- |
+| `flow_mcp.py` | Servidor MCP e registro das ferramentas |
+| `flow_http.py` | Worker por conta: HTTP + Chrome residente |
+| `flow_browser.py` | Chrome dedicado, páginas de preparo descartáveis |
+| `flow_requests.py` | Corpos dos RPCs do Flow |
+| `flow_video.py` | Geração de vídeo/imagem, orçamento, tarefas |
+| `flow_edit.py`, `flow_annotations.py` | Edição de imagem e anotações |
+| `flow_scene.py`, `flow_character.py`, `flow_agent.py` | Cenas, personagens, Agent/brief |
+| `flow_projects.py`, `flow_assets.py`, `flow_collections.py` | Projetos, ativos, coleções |
+| `flow_capabilities.py`, `flow_credits.py`, `flow_settings.py` | Catálogo/custos, saldo, preferências |
+| `flow_accounts.py`, `flow_session.py`, `extension/` | Contas, login e ponte de sessão |
+| `keepalive.py` | Consulta periódica de saldo por conta (mantém sessões e detecta queda) |
+| `deploy/` | Login isolado no Windows → importação na Banana Pi |
+| `test_*.py` | Suíte `uv run --locked python -m unittest -v` |
+
+Documentação: `PLANO-MCP.md` (requisitos), `docs/IMPLEMENTACAO-FLOW.md` (registro
+detalhado e gastos), `docs/AUTENTICACAO-PORTABILIDADE.md`, `README.md`.
+
+Ambientes: Windows (`.venv-windows`, onde o MCP está registrado no Claude Code,
+Antigravity e Codex), WSL (testes) e Banana Pi `pi@192.168.0.52` (chave
+`~/.ssh/id_ed25519_win`, tudo em `/mnt/ssd/flow-mcp/`; carregar `env.sh`).
+Perfis em `profiles/profile_<conta>` (Windows) e `/mnt/ssd/flow-mcp/home` (Pi).
+
+## Histórico (mais antigo → mais recente)
+
 - Responder em pt-BR. Este é um MCP independente; não modificar MoneyPrinterTurbo
   como parte deste projeto sem um pedido específico.
 - Usar Python 3.11+ e `uv`. Servidor atual: `flow_mcp.py`, transporte `stdio`.
@@ -388,3 +436,18 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   ambiente do MCP). Validado no Windows: duas contas autenticadas, saldo consultado pelo
   e-mail. Suítes WSL/Windows: 200 testes; MCP: 64 ferramentas. Sem gasto.
   Perfil antigo `conta-a` (WSL) removido a pedido do usuário; 419 tarefas antigas dele em `profiles/jobs` preservadas.
+- Banana Pi e keepalive (05/10/2026): sessão copiada do Chrome Windows caiu em ~11 h
+  na Pi. Nova abordagem: `deploy/login_para_pi.py` abre Chrome limpo no Windows
+  (perfil temporário, sessão própria), o usuário faz login e os cookies seguem por
+  pipe SSH para `deploy/importar_sessao.py` na Pi (nunca em arquivo nem no log).
+  `keepalive.py` ganhou trava, pausa com jitter, estado persistente, `needs_login`
+  após 2 falhas e fingerprint da rotação do cookie. Objetivo: 9 contas na Pi.
+  Andamento em AI Memory `projeto/em-andamento.md`.
+- 9 contas na Pi (05/10/2026): ddv1–4, ddv6–9 (`lucashenriqueddvN@gmail.com`) e
+  `checkpointsecret`, cada uma com login limpo; saldo HTTP confirmado em todas.
+  Nome do perfil = prefixo do e-mail. Conta que nunca abriu o Flow mostra popup
+  de primeiro acesso e o saldo fica `unavailable` até aceitá-lo (aceite é da
+  conta); `login_para_pi.py` deixa a janela 1 min após o Flow carregar e relê os
+  cookies a cada 5 s. Uma janela por conta. Perfis antigos `conta-b`/
+  `conta-ponte-a` removidos da Pi. Cron `*/30` roda `keepalive.py` com log/estado
+  em `/mnt/ssd/flow-mcp/logs/`. Sem gasto de créditos.
