@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Google Flow MCP — Conectar sessão",
+  "version": "0.1.0",
+  "description": "Envia a sessão Google ao seu MCP local somente após clique e pareamento temporário.",
+  "permissions": ["cookies", "activeTab"],
+  "host_permissions": [
+    "https://google.com/*", "https://www.google.com/*",
+    "https://accounts.google.com/*", "https://labs.google/*",
+    "https://flow.google.com/*", "http://127.0.0.1/*"
+  ],
+  "action": {"default_title": "Conectar sessão ao Flow MCP", "default_popup": "popup.html"}
+}

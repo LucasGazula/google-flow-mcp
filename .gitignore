@@ -1,0 +1,21 @@
+.venv/
+.venv-windows/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.env
+.env.*
+!.env.example
+# Sessões, credenciais e arquivos gerados ficam fora do Git.
+profiles/
+secrets/
+downloads/
+exports/
+storage_state*.json
+cookies*.json
+*.log
+# Sondagens locais de validação não fazem parte do servidor.
+.probe_*.py
+.validate_*.py

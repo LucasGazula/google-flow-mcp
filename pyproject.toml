@@ -1,0 +1,11 @@
+[project]
+name = "google-flow-mcp"
+version = "0.1.0"
+description = "Servidor MCP local para integração com Google Flow"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gflow-cli==0.79.1",
+    "httpx>=0.28,<1",
+    "mcp>=2.2,<3",
+]
