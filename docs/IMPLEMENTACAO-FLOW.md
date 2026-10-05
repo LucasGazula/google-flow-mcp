@@ -1449,3 +1449,13 @@ pendentes; "Criar retrato/corpo" geram mídia e não foram usados.
   experimento Lightpanda na branch `experimento/lightpanda`. Servidor registrado como
   `google-flow` no Claude Code (escopo usuário), Antigravity CLI e Codex, executando
   no Windows via `powershell.exe` (`.venv-windows`).
+- Keepalive e queda da sessão copiada (05/10/2026): `keepalive.py` consulta o saldo de
+  cada `profile_*` em série, grava uma linha JSON por conta em log e sai com 1 se
+  alguma não estiver `ok` (perfil ocupado = `busy`). Na Banana Pi, ~11 h depois da
+  importação (sem uso nesse intervalo), as duas contas retornaram `unavailable` e o
+  Flow redirecionou para `flow.google.com/about` (deslogado), enquanto o Windows seguiu
+  `ok` (conta-b 1046, conta-ponte-a 1050). A sessão copiada não sobreviveu; causa não
+  determinada (rotação concorrente de cookies com o Windows, expiração ou credencial
+  atrelada ao dispositivo). O timer de keepalive só ajuda enquanto a sessão estiver
+  viva; para durar, a Banana Pi precisa de login próprio (assistido) com linhagem de
+  cookies independente da do Windows. Cron não instalado.
