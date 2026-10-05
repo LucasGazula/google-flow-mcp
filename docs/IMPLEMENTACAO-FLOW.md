@@ -1427,3 +1427,25 @@ pendentes; "Criar retrato/corpo" geram mídia e não foram usados.
   contenteditable), sem envio e sem gasto. Ressalvas: UA `Lightpanda/x` (o binário proíbe
   UA com "Mozilla"), cookies ainda vêm do Chrome do Windows, sem perfil persistente e
   sem Banana Pi (glibc). Contabilizados 426/700.
+
+- Deploy na Banana Pi (05/10/2026): Banana Pi M5, Ubuntu 20.04 aarch64, kernel 4.9,
+  `pi@192.168.0.52` (chave `id_ed25519_win`). Tudo no SSD em `/mnt/ssd/flow-mcp/`
+  (`app/` código da main via `git archive`, `venv/`, `python/`, `cache/`, `browsers/`,
+  `home/` perfis, `env.sh`, `run-mcp.sh`); o cartão SD tem ~680 MB livres, não usar.
+  `uv` 0.12 + Python 3.11 e Chromium 149 do Playwright (glibc 2.25 ok); apt: libs
+  gráficas, `xvfb`, `xauth`. `CHROME_BINARY` em `env.sh`. Chromium abre sem
+  `--no-sandbox` (0,7–5,6 s), carrega o Flow em 2–5 s, ~730–930 MB RSS somados.
+  Sessões: cookies lidos do Chrome Windows (filtrados para DOMAINS, formato da
+  extensão) e enviados por pipe SSH para arquivo 0600 no SSD, importados e apagados.
+  `flow_session.py import` trava no seletor de contas sem usuário (Xvfb); usado um
+  importador direto que troca só a etapa do seletor. `verify_flow_profile` retorna
+  `google_session_only` no Linux mesmo com a sessão válida (screenshot do Flow
+  logado, selo PRO); o teste confiável é o saldo HTTP do worker: conta-b 1046 e
+  conta-ponte-a 1050 na Banana Pi, iguais ao Windows (1050 = reinício mensal).
+  `.gflow_account` gravado manualmente. MCP via SSH: `/mnt/ssd/flow-mcp/run-mcp.sh`,
+  64 ferramentas. Sem gasto de créditos neste deploy; estabilidade prolongada e
+  durabilidade da sessão (Google pode revogar cookies em outro dispositivo) pendentes.
+- Repositório (05/10/2026): GitHub privado `LucasGazula/google-flow-mcp` (main);
+  experimento Lightpanda na branch `experimento/lightpanda`. Servidor registrado como
+  `google-flow` no Claude Code (escopo usuário), Antigravity CLI e Codex, executando
+  no Windows via `powershell.exe` (`.venv-windows`).
