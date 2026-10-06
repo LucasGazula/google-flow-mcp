@@ -505,3 +505,8 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   As 9 contas foram relogadas assim. O script reabre o navegador (até 3 vezes) quando
   o Flow abre antes de a sessão estar gravada. Não sobrescrever o script com uma janela
   aberta (bash lê o arquivo enquanto roda); trocar com `mv`.
+- Teste ponta a ponta (06/10/2026, ddv1): 4 imagens Nano Banana 2.1 (custo 0),
+  personagem com voz Charon, 3× Omni Flash 10s/720p r2v (45 créditos, 1050→1005),
+  cena nativa exportada em MP4 30 s. Corrigido `parse_assets`: mídias sem versão
+  em projeto com personagem eram ocultadas (listagem vazia, `reference_asset_ids`
+  recusado); cópias agora só por IDs do personagem (`64d220a`, validado na Pi).
