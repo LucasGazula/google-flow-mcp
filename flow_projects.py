@@ -4,25 +4,33 @@ from datetime import datetime, timezone
 import asyncio
 import re
 from flow_browser import account_page
+from flow_errors import error_fields
 
 
 def validate_project(project_id: str) -> str:
     # IDs legados do Flow podem terminar em _backfill; o identificador é opaco.
     if not isinstance(project_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_id):
-        raise ValueError("Projeto inválido.")
+        raise ValueError(f"Projeto inválido ({str(project_id)[:80]!r}); use um project_id de flow_list_projects.")
     return project_id
 
 
 def parse_projects(payload) -> dict:
-    """UpteDb: lista de pares ID/metadados; somente ID e título saem."""
-    if not isinstance(payload, list) or not payload or not isinstance(payload[0], list):
+    """UpteDb: lista de pares ID/metadados; somente ID e título saem.
+
+    Conta sem projetos pode vir com a lista nula; linhas em formato desconhecido
+    são ignoradas para não esconder os demais projetos.
+    """
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], (list, type(None))):
         raise ValueError("Resposta de projetos não reconhecida.")
     projects = []
-    for row in payload[0]:
-        if (not isinstance(row, list) or len(row) != 2 or not isinstance(row[1], list)
-                or not row[1] or not isinstance(row[1][0], str)):
-            raise ValueError("Registro de projeto não reconhecido.")
-        projects.append({"project_id": validate_project(row[0]), "title": row[1][0]})
+    for row in payload[0] or []:
+        try:
+            project_id = validate_project(row[0])
+        except (ValueError, TypeError, IndexError, KeyError):
+            continue
+        meta = row[1] if len(row) > 1 and isinstance(row[1], list) else []
+        projects.append({"project_id": project_id,
+                         "title": meta[0] if meta and isinstance(meta[0], str) else None})
     # Campo adicional pode representar paginação: nunca anunciar lista completa.
     return {"projects": projects, "complete": len(payload) == 1}
 
@@ -127,10 +135,11 @@ async def delete_project(account_id: str, project_id: str, *, confirm_delete: bo
         if project is None:
             return {"account_id": account_id, "project_id": project_id,
                     "status": "not_found_in_project_listing", "complete": before["complete"]}
+        submit_error = {}
         try:
             await client.rpc("QI2zvc", params=[f"projects/{project_id}"])
-        except Exception:
-            pass  # Reconcile by reading; never resend an uncertain deletion.
+        except Exception as exc:
+            submit_error = error_fields(exc, "submit_")  # Reconcile by reading; never resend an uncertain deletion.
         try:
             after = parse_projects(await client.rpc("UpteDb"))
         except Exception:
@@ -139,7 +148,7 @@ async def delete_project(account_id: str, project_id: str, *, confirm_delete: bo
             return {"account_id": account_id, "project_id": project_id, "title": project["title"],
                     "status": "deleted", "source": "HTTP/QI2zvc+UpteDb"}
         return {"account_id": account_id, "project_id": project_id, "title": project["title"],
-                "status": "submission_unknown",
+                "status": "submission_unknown", **submit_error,
                 "message": "Exclusão inconclusiva; confira os projetos antes de repetir. Nenhum reenvio automático foi feito."}
     finally:
         if owned:
@@ -150,7 +159,6 @@ async def download_project(account_id: str, project_id: str, output_dir: str | N
                            kind: str | None = None, query: str = "",
                            collection_id: str | None = None, recursive: bool = False, *, client=None) -> dict:
     """Baixa todos os ativos de um projeto para um diretório local com suporte a filtros."""
-    import os
     from pathlib import Path
     import shutil
     from flow_http import FlowHTTP, http_operation
@@ -201,7 +209,9 @@ async def download_project(account_id: str, project_id: str, output_dir: str | N
         if output_dir:
             target_dir = Path(output_dir).resolve()
         else:
-            base_output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
+            from flow_video import downloads_dir
+
+            base_output = downloads_dir()
             target_dir = base_output / (f"collection_{collection_id}" if collection_id else f"project_{project_id}")
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -227,7 +237,7 @@ async def download_project(account_id: str, project_id: str, output_dir: str | N
                 failed.append({
                     "media_id": mid,
                     "name": item.get("name"),
-                    "error": str(exc)
+                    **error_fields(exc)
                 })
 
         return {

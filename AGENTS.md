@@ -34,9 +34,10 @@ incertas nunca são reenviadas; tarefas ficam persistidas e são recuperáveis.
 | `flow_projects.py`, `flow_assets.py`, `flow_collections.py` | Projetos, ativos, coleções |
 | `flow_capabilities.py`, `flow_credits.py`, `flow_settings.py` | Catálogo/custos, saldo, preferências |
 | `flow_accounts.py`, `flow_session.py`, `extension/` | Contas, login e ponte de sessão |
+| `flow_errors.py` | Mensagens de erro seguras (`error`), `next_step` por status, leitura tolerante |
 | `keepalive.py` | Consulta periódica de saldo por conta (mantém sessões e detecta queda) |
 | `deploy/` | Login isolado no Windows → importação na Banana Pi |
-| `test_*.py` | Suíte `uv run --locked python -m unittest -v` |
+| `test_*.py` | Suíte `uv run --locked python -m unittest -v`; `test_gflow_contract.py` confere os internos do gflow-cli usados |
 
 Documentação: `PLANO-MCP.md` (requisitos), `docs/IMPLEMENTACAO-FLOW.md` (registro
 detalhado e gastos), `docs/AUTENTICACAO-PORTABILIDADE.md`, `README.md`.
@@ -467,3 +468,31 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   ele não sobe). Na Pi roda como serviço `flow-mcp` (`deploy/flow-mcp.service`,
   token em `/mnt/ssd/flow-mcp/http.env`, modo 600); o deploy reinicia o serviço.
   A Pi passa a ser o MCP principal; caminhos de arquivo das ferramentas são da Pi.
+- Estabilidade (06/10/2026): `flow_errors.error_fields` repassa ao agente só
+  mensagens escritas pelo MCP (rede/backend viram dica); `next_step` por status.
+  Leituras (ativos, projetos, coleções, personagens, ferramentas, cenas, catálogo
+  HTrJv) ignoram linhas em formato novo em vez de falhar; mutações e composição
+  de cena seguem estritas. Pipe do worker aceita respostas >64 KiB (antes
+  derrubava o worker). Leitura com HTTP≠200 recopia cookies do Chrome e repete
+  uma vez; mutação nunca. Workers esperam 45 s pelo lease do perfil; keepalive
+  trata perfil ocupado como `busy`. `flow_status` mostra máquina, versão e
+  pastas, Chrome/ffmpeg disponíveis. Worker fecha o Chrome após 15 min ocioso
+  (`FLOW_MCP_WORKER_IDLE_SECONDS`). Conta ocupada por mais de 30 s responde
+  `account_busy` (nada enviado); `flow_wait_job` continua esperando. Erro inesperado
+  no próprio código traz `error_location` (arquivo:linha). `flow_list_accounts` traz
+  `keepalive.needs_login` por conta (Pi). Saldo `nzlxg` e `Zzl0ze` aceitam campos/
+  seções novas no fim. Deploy confere HTTP 401 em /mcp após reiniciar.
+  Diagnóstico: `logs/operations.jsonl` na Pi (ou `FLOW_MCP_LOG`), só campos seguros.
+  **Bug de deploy corrigido**: sem `FLOW_MCP_OUTPUT` na Pi os downloads ficam em
+  `app/downloads`, que o `rsync --delete` apagava a cada push; agora o rsync protege
+  downloads/profiles/exports/logs. `flow_status` mostra `disk_free_mb`.
+  `flow_recover_job` passa a distinguir geração perdida no Flow: POST aceito, mas a
+  mídia não aparece na listagem nem no `as29s` → `recovery_status=not_found` com
+  orientação (antes tentava baixar e falhava com erro genérico). As duas tarefas Omni
+  de 06/10 (c7a120a2, c15715a2) foram reclassificadas assim, sem reenvio.
+  `flow_wait_job` para com `wait_status=not_found` após 3 consultas assim.
+  `flow_account_status` confirma por HTTP (listagem de projetos) quando a checagem do
+  navegador falha — no Linux ela dá `google_session_only` com sessão válida (ddv1 na
+  Pi agora aparece `authenticated`, `verified_by=HTTP/UpteDb`). Saldo não clica mais no
+  menu da conta (usa a sessão da listagem); conta deslogada é detectada em ~12 s.
+  A Pi não tem ffmpeg (ferramentas locais de vídeo falham lá). Suítes WSL/Windows: 235 testes; MCP: 65 ferramentas (novo `flow_quote_images`).

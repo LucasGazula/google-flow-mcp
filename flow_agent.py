@@ -4,13 +4,14 @@ from datetime import datetime, timezone
 import json
 import re
 
+from flow_errors import error_fields, tolerant_rows
 from flow_accounts import validate_account
 from flow_projects import validate_project
 
 
 def parse_agent_brief(payload) -> dict:
     """Brief do Agent na oitava seção de Zzl0ze: [_, [ativo, [[id, título, texto, ativo]]], ...]."""
-    if not isinstance(payload, list) or len(payload) != 8:
+    if not isinstance(payload, list) or len(payload) < 8:  # Seções novas no fim não invalidam.
         raise ValueError("Resposta do projeto não reconhecida.")
     info = payload[7] if isinstance(payload[7], list) else []
     brief = info[1] if len(info) > 1 and isinstance(info[1], list) else []
@@ -64,19 +65,18 @@ def _cards(values) -> tuple:
 
 
 def _parse_agent_sessions(payload) -> list[dict]:
-    if not isinstance(payload, list) or (payload and not isinstance(payload[0], list)):
+    # Projeto sem sessões pode vir como [] ou [null].
+    if not isinstance(payload, list) or (payload and not isinstance(payload[0], (list, type(None)))):
         raise ValueError("Resposta de sessões do Agent não reconhecida.")
-    if not payload:
-        return []
-    sessions = []
-    for row in payload[0]:
+
+    def parse(row):
         if not isinstance(row, list) or not row or not isinstance(row[0], str) or not re.fullmatch(
                 r"[A-Za-z0-9_-]{1,128}", row[0]):
             raise ValueError("Registro de sessão do Agent não reconhecido.")
         metadata = row[1] if len(row) > 1 and isinstance(row[1], list) else []
-        title = metadata[0] if metadata and isinstance(metadata[0], str) else None
-        sessions.append({"session_id": row[0], "title": title})
-    return sessions
+        return {"session_id": row[0], "title": metadata[0] if metadata and isinstance(metadata[0], str) else None}
+
+    return tolerant_rows(payload[0] if payload else [], parse)
 
 
 async def _read_agent_sessions(client, project_id: str) -> list[dict]:
@@ -322,18 +322,19 @@ def parse_tools(payload) -> list[dict]:
     """Applets de ListApplets (tRARke): Minhas ferramentas, Modelos e Comunidade."""
     if not isinstance(payload, list) or not payload or not isinstance(payload[0], list):
         raise ValueError("Resposta de ferramentas não reconhecida.")
-    tools = []
-    for row in payload[0]:
+
+    def parse(row):
         if (not isinstance(row, list) or len(row) < 13 or not isinstance(row[2], str)
                 or not isinstance(row[11], str) or not row[11].startswith("applets/")
                 or row[12] not in _TOOL_CATEGORIES):
             raise ValueError("Ferramenta não reconhecida.")
-        tools.append({"tool_id":row[11].removeprefix("applets/"), "title":row[2],
-                      "description":row[3] if isinstance(row[3], str) else "",
-                      "category":_TOOL_CATEGORIES[row[12]],
-                      "creator":row[17] if len(row) > 17 and isinstance(row[17], str) else None,
-                      "created_at":_seconds_iso(row[7]), "updated_at":_seconds_iso(row[8])})
-    return tools
+        return {"tool_id":row[11].removeprefix("applets/"), "title":row[2],
+                "description":row[3] if isinstance(row[3], str) else "",
+                "category":_TOOL_CATEGORIES[row[12]],
+                "creator":row[17] if len(row) > 17 and isinstance(row[17], str) else None,
+                "created_at":_seconds_iso(row[7]), "updated_at":_seconds_iso(row[8])}
+
+    return tolerant_rows(payload[0], parse)
 
 
 async def list_tools(account_id: str, category: str = "all", query: str = "", *, client=None) -> dict:
@@ -511,19 +512,20 @@ async def agent_request(account_id: str, project_id: str, message: str, *,
         if response.status_code != 200:
             raise ValueError("Resposta do Agent inconclusiva; não reenviar.")
         result = parse_agent_stream(response.text)
-        after = parse_http_credits(await client.rpc("nzlxg"))
+        try:
+            after = parse_http_credits(await client.rpc("nzlxg"))
+        except Exception:
+            after = None  # A resposta já chegou; saldo ilegível não a invalida.
         unexpected = [tool for tool in result["tools"] if not tool.startswith(_READ_ONLY_TOOL_PREFIXES)]
         job.update(status="completed", tools=result["tools"], credits_before=before, credits_after=after)
         save_job(job)
-        return {**job, "answer":result["answer"], "credits_spent":before - after,
+        return {**job, "answer":result["answer"], "credits_spent":None if after is None else before - after,
                 "unexpected_tools":unexpected,
                 "warning":("O Agent chamou ferramentas fora da lista somente leitura; confira o projeto."
                            if unexpected and not allow_media_changes else None)}
     except Exception as exc:
         job.update(status="failed_pre_submit" if job["status"] == "preparing" else "submission_unknown",
-                   error_type=type(exc).__name__, retry_automatically=False)
-        if job["status"] == "failed_pre_submit" and isinstance(exc, ValueError):
-            job["message"] = str(exc)
+                   retry_automatically=False, **error_fields(exc))
         save_job(job)
         return job
     finally:

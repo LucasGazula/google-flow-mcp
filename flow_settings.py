@@ -21,7 +21,8 @@ def parse_user_settings(payload: list) -> dict:
         value = payload[field - 1] if len(payload) >= field else None
         if name == "view_mode":
             value = "grid" if value is None else value
-            if not isinstance(value, str) or value not in {"grid", "batch"}:
+            # Modo novo do Flow é informado como veio; só a escrita se limita a grid/batch.
+            if not isinstance(value, str) or not value or len(value) > 40:
                 raise ValueError("Modo de exibição não reconhecido.")
         else:
             value = False if value is None else value

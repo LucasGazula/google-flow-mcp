@@ -87,6 +87,43 @@ class AccountTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result["generation_enabled"])
 
 
+
+
+
+class StatusCrossCheckTest(unittest.IsolatedAsyncioTestCase):
+    async def test_linux_browser_false_negative_is_confirmed_by_http(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from flow_accounts import account_operation
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def close(self):
+                pass
+
+        session = SimpleNamespace(outcome=SimpleNamespace(value="google_session_only"), authenticated=False,
+                                  user_email=None)
+        with tempfile.TemporaryDirectory() as home, \
+                patch("gflow_cli.auth.status", return_value={"exists": True, "cookies_present": True}), \
+                patch("gflow_cli.auth.profile_dir", return_value=Path(home)), \
+                patch("gflow_cli.auth.verification.verify_flow_profile", AsyncMock(return_value=session)), \
+                patch("flow_http.FlowHTTP", Client), \
+                patch("flow_http.http_operation", AsyncMock(return_value={"status": "ok"})) as listing:
+            result = await account_operation("status", "ddv1")
+            self.assertEqual((result["status"], result["authenticated"]), ("authenticated", True))
+            self.assertEqual(result["browser_check"], "google_session_only")
+            async def logged_out(*args, **kwargs):
+                raise ValueError("Conta deslogada.")  # levantada por código do projeto, como no flow_http
+
+            listing.side_effect = logged_out
+            result = await account_operation("status", "ddv1")
+        self.assertEqual((result["status"], result["authenticated"]), ("google_session_only", False))
+        self.assertEqual(result["http_check_error"], "Conta deslogada.")
+
+
 if __name__ == "__main__":
     unittest.main()
-

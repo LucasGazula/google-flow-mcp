@@ -51,15 +51,30 @@ class CapabilityTest(unittest.IsolatedAsyncioTestCase):
         for tier in (None, True, 0, 4, "2"):
             with self.assertRaises(ValueError):
                 parse_capabilities(catalog_fixture(), tier, {})
-        for value in (None, [], {}, [[["../bad", 1]]], [[["model", True]]], [[["model", 4]]]):
+        for value in (None, [], {}):
             with self.assertRaises(ValueError):
                 parse_model_statuses(value)
+        self.assertEqual(parse_model_statuses([[["../bad", 1]]]), {})
+        for row in (["model", True], ["model", 4], ["model", 1, "bad"]):
+            # Estado desconhecido nunca libera o modelo.
+            self.assertTrue(parse_model_statuses([[row]])["model"]["blocked"])
+        base = dict(aspect="16:9", count=1, max_credits=100, features=[1], duration_seconds=8)
         for field, value in ((4, [[2, [[None, -1]]]]), (4, [[2, [[None, True]]]]),
                              (12, [[99]]), (16, -1), (23, [[99]]), (0, "../private")):
             data = copy.deepcopy(catalog_fixture())
             data[0][4][0][1][0][field] = value
+            # Variante em formato desconhecido some do catálogo (sem derrubar os demais modelos)
+            # e nunca vira geração cotada.
+            modes = parse_capabilities(data, 2, {})
+            self.assertEqual(modes["video"]["models"][0]["variants"], [])
+            self.assertEqual(len(modes["image"]["models"]), 1)
             with self.assertRaises(ValueError):
-                parse_capabilities(data, 2, {})
+                quote_configuration({"modes": modes, "service_tier_code": 2, "observed_at": "now"},
+                                    "veo-lite", **base)
+        data = copy.deepcopy(catalog_fixture())
+        data[0][4].append(["Modelo novo", "formato desconhecido", None, "novo"])
+        self.assertEqual([m["model_id"] for m in parse_capabilities(data, 2, {})["video"]["models"]],
+                         ["veo_3_1_lite"])
 
     def test_native_quote_preserves_model_features_duration_and_budget(self):
         caps={"modes":parse_capabilities(catalog_fixture(),2,{}),"service_tier_code":2,"observed_at":"now"}
@@ -137,6 +152,22 @@ class CapabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.rpc.await_count, 1)
         with self.assertRaises(ValueError):
             await read_capabilities("conta-other", "project", client=client)
+
+
+    async def test_image_quote_uses_latest_project_and_catalog_without_sending(self):
+        from unittest.mock import patch
+        from flow_video import quote_images
+
+        caps = {"modes": parse_capabilities(catalog_fixture(), 2, {}), "service_tier_code": 2,
+                "observed_at": "now", "credits": 900}
+        client = SimpleNamespace(account_id="conta-a", rpc=AsyncMock(return_value=[[["projeto-1", ["T"]]]]))
+        with patch("flow_capabilities.read_capabilities", AsyncMock(return_value=caps)) as read:
+            result = await quote_images("conta-a", "Nano_Banana_2", "1:1", 2, True, client=client)
+        self.assertEqual((result["status"], result["quoted_credits"], result["project_id"]), ("quoted", 0, "projeto-1"))
+        read.assert_awaited_once_with("conta-a", "projeto-1", client=client)
+        client.rpc.assert_awaited_once_with("UpteDb")  # só leituras; nenhum envio
+        with self.assertRaises(ValueError):
+            await quote_images("conta-a", "nano-banana-2", "1:1", 5, client=client)
 
 
 if __name__ == "__main__":

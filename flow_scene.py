@@ -7,13 +7,13 @@ import os
 from pathlib import Path
 import re
 import shutil
-import time
 from uuid import uuid4
 
 from flow_accounts import validate_account
+from flow_errors import error_fields, tolerant_rows
 from flow_assets import media_uuid
 from flow_projects import validate_project
-from flow_video import get_job, save_job
+from flow_video import downloads_dir, get_job, save_job
 
 
 _SCENE_ID = re.compile(r"^[A-Za-z0-9-]{1,128}$")
@@ -21,7 +21,7 @@ _SCENE_ID = re.compile(r"^[A-Za-z0-9-]{1,128}$")
 
 def _scene_id(value: str) -> str:
     if not isinstance(value, str) or not _SCENE_ID.fullmatch(value):
-        raise ValueError("ID de cena inválido.")
+        raise ValueError(f"scene_id inválido ({str(value)[:80]!r}); use um scene_id de flow_list_scenes.")
     return value
 
 
@@ -37,14 +37,14 @@ def _native_scene(row, project_id):
 
 def parse_scenes(payload, project_id):
     validate_project(project_id)
-    if not isinstance(payload, list) or len(payload) != 8:
+    if not isinstance(payload, list) or len(payload) < 8:  # Seções novas no fim não invalidam.
         raise ValueError("Resposta de cenas não reconhecida.")
     rows = payload[4]
     if rows is None:
         return []
     if not isinstance(rows, list):
         raise ValueError("Resposta de cenas não reconhecida.")
-    scenes = [_native_scene(row, project_id) for row in rows]
+    scenes = tolerant_rows(rows, lambda row: _native_scene(row, project_id))
     if len({scene["scene_id"] for scene in scenes}) != len(scenes):
         raise ValueError("Cena duplicada na resposta do projeto.")
     return scenes
@@ -128,9 +128,7 @@ def _duration_wire(seconds):
 def _scene_job_failed(job, exc):
     before = job["status"] == "preparing"
     job.update(status="failed_pre_submit" if before else "submission_unknown",
-               error_type=type(exc).__name__, retry_automatically=False)
-    if before and isinstance(exc, ValueError):
-        job["message"] = str(exc)
+               retry_automatically=False, **error_fields(exc))
     save_job(job)
     return job
 
@@ -190,8 +188,9 @@ async def _add_scene_clips(client, project_id, scene_id, workflow_ids, position)
         # Pedido capturado na interface: [projeto, cena, workflow_ids, posição].
         try:
             await client.rpc("oWTRd", params=[project_id, scene_id, workflow_ids, position])
-        except Exception:
-            pass  # Resultado decidido só pela leitura posterior; nunca reenviar.
+        except Exception as exc:
+            # Resultado decidido só pela leitura posterior; nunca reenviar. O erro fica como evidência.
+            job.update(error_fields(exc, "submit_"))
         # A listagem pode atrasar alguns segundos; somente leituras se repetem.
         for attempt in range(6):
             if attempt:
@@ -263,8 +262,9 @@ async def _update_scene_clips(client, project_id, scene_id, clips, remove_ids=No
         save_job(job)
         try:
             await client.rpc("GoMJte", params=params)
-        except Exception:
-            pass  # Resultado decidido só pela leitura posterior; nunca reenviar.
+        except Exception as exc:
+            # Resultado decidido só pela leitura posterior; nunca reenviar. O erro fica como evidência.
+            job.update(error_fields(exc, "submit_"))
         wanted = {clip.workflow_id: clip.metadata for clip in updated}
         for attempt in range(6):
             if attempt:
@@ -303,8 +303,9 @@ async def _update_scene_record(client, project_id, scene_id, params, kind, confi
         save_job(job)
         try:
             await client.rpc(rpc_id, params=params)
-        except Exception:
-            pass  # Resultado decidido só pela leitura posterior; nunca reenviar.
+        except Exception as exc:
+            # Resultado decidido só pela leitura posterior; nunca reenviar. O erro fica como evidência.
+            job.update(error_fields(exc, "submit_"))
         for attempt in range(6):
             if attempt:
                 await asyncio.sleep(2)
@@ -346,7 +347,8 @@ async def manage_scene(account_id: str, project_id: str, operation: str,
     validate_account(account_id)
     validate_project(project_id)
     if operation not in {"create", "read", "add", "remove", "update", "rename", "archive", "restore", "delete"}:
-        raise ValueError("Operação de cena inválida.")
+        raise ValueError("Operação de cena inválida: use create, read, add, remove, update, rename, "
+                         "archive, restore ou delete.")
     if operation == "rename" and (not isinstance(title, str) or not title.strip() or len(title) > 200):
         raise ValueError("Informe um título de 1 a 200 caracteres.")
     if operation in {"archive", "delete"} and confirm is not True:
@@ -354,7 +356,8 @@ async def manage_scene(account_id: str, project_id: str, operation: str,
     if operation in {"create", "add", "remove"} and (workflow_ids or operation != "create"):
         if (not isinstance(workflow_ids, list) or not 1 <= len(workflow_ids) <= 50
                 or len(set(workflow_ids)) != len(workflow_ids)):
-            raise ValueError("Informe de 1 a 50 IDs de clipe distintos.")
+            raise ValueError("Informe workflow_ids: de 1 a 50 IDs distintos (workflow_id de flow_list_assets "
+                             "para add/create; IDs dos clipes da cena, de operation=read, para remove).")
         for workflow_id in workflow_ids:
             media_uuid(workflow_id)
     elif operation == "create" and workflow_ids not in (None, []):
@@ -455,12 +458,14 @@ async def export_scene(account_id: str, project_id: str, scene_id: str,
                 break
         encoded = state[4] if isinstance(state, list) and len(state) > 4 else None
         if not isinstance(encoded, str) or not encoded:
+            if isinstance(state, list) and state and state[0] == 2:
+                raise ValueError("Exportação ainda em processamento após 3 minutos. Nas validações a "
+                                 "exportação não gastou créditos; uma nova chamada mais tarde inicia outra exportação.")
             raise ValueError("Exportação sem arquivo confirmado.")
         video = base64.b64decode(encoded, validate=True)
         if video[4:8] != b"ftyp":
             raise ValueError("Exportação não retornou MP4.")
-        output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-        output.mkdir(parents=True, exist_ok=True)
+        output = downloads_dir()
         target = output / f"scene_{scene_id}_{job['job_id'][:8]}.mp4"
         await asyncio.to_thread(target.write_bytes, video)
         job.update(status="completed", files=[str(target)])
@@ -478,8 +483,7 @@ async def _ensure_local_asset(client, account_id: str, project_id: str, media_id
     """Garante que o arquivo de mídia (vídeo ou imagem) esteja disponível localmente."""
     from flow_http import http_operation
 
-    output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-    output.mkdir(parents=True, exist_ok=True)
+    output = downloads_dir()
     for ext in [".mp4", ".png", ".jpg", ".jpeg", ".webp"]:
         candidate = output / f"{media_id}{ext}"
         if candidate.is_file() and candidate.stat().st_size > 0:
@@ -520,7 +524,7 @@ async def save_video_frame(account_id: str, project_id: str, media_id: str,
 
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        raise RuntimeError("ffmpeg não está instalado no ambiente.")
+        raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
 
     owned = client is None
     if client is not None and client.account_id != account_id:
@@ -530,7 +534,7 @@ async def save_video_frame(account_id: str, project_id: str, media_id: str,
     try:
         video_path = await _ensure_local_video(client, account_id, project_id, media_id)
 
-        output_dir = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
+        output_dir = downloads_dir()
         frame_id = str(uuid4())
         frame_path = output_dir / f"frame_{media_id}_{frame_id[:8]}.png"
 
@@ -598,7 +602,7 @@ async def export_video_gif(account_id: str, project_id: str, media_id: str,
 
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        raise RuntimeError("ffmpeg não está instalado no ambiente.")
+        raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
 
     owned = client is None
     if client is not None and client.account_id != account_id:
@@ -608,7 +612,7 @@ async def export_video_gif(account_id: str, project_id: str, media_id: str,
     try:
         video_path = await _ensure_local_video(client, account_id, project_id, media_id)
 
-        output_dir = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
+        output_dir = downloads_dir()
         gif_id = str(uuid4())
         gif_path = output_dir / f"{media_id}_{gif_id[:8]}.gif"
 
@@ -716,7 +720,7 @@ async def build_scene(account_id: str, project_id: str, clips: list[dict],
 
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        raise RuntimeError("ffmpeg não está instalado no ambiente.")
+        raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
 
     owned = client is None
     if client is not None and client.account_id != account_id:
@@ -724,7 +728,7 @@ async def build_scene(account_id: str, project_id: str, clips: list[dict],
     client = client or FlowHTTP(account_id)
 
     try:
-        output_dir = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
+        output_dir = downloads_dir()
         scene_id = str(uuid4())
         scene_path = output_dir / f"scene_{scene_id[:8]}.mp4"
 
@@ -843,7 +847,7 @@ async def upscale_media(account_id: str, project_id: str, media_id: str,
 
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        raise RuntimeError("ffmpeg não está instalado no ambiente.")
+        raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
 
     owned = client is None
     if client is not None and client.account_id != account_id:
@@ -853,7 +857,7 @@ async def upscale_media(account_id: str, project_id: str, media_id: str,
     try:
         source_path, kind = await _ensure_local_asset(client, account_id, project_id, media_id)
 
-        output_dir = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
+        output_dir = downloads_dir()
         upscale_id = str(uuid4())
 
         scale_filter = f"scale='if(gte(a,1),{max_dim},-2)':'if(gte(a,1),-2,{max_dim})':flags=lanczos,unsharp=5:5:0.8:3:3:0.4"

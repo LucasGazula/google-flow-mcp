@@ -30,6 +30,11 @@ class FlowBrowser:
             from playwright.async_api import async_playwright
 
             validate_account(self.account_id)
+            if not auth.profile_dir(self.account_id).is_dir():
+                import platform
+
+                raise ValueError(f"A conta '{self.account_id}' não tem perfil nesta máquina ({platform.node()}); "
+                                 "use um e-mail/apelido de flow_list_accounts ou conecte a conta.")
             pdir = auth.profile_dir(self.account_id).resolve(strict=True)
             if not pdir.is_relative_to(get_settings().home.resolve(strict=True)):
                 raise ValueError("Perfil fora do diretório configurado.")

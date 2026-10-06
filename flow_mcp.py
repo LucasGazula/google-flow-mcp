@@ -13,6 +13,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from flow_accounts import validate_account
+from flow_errors import with_next_step
 from flow_session import SessionBridge
 
 root = Path(os.environ.get("FLOW_MCP_HOME", Path(__file__).parent / "profiles")).resolve()
@@ -40,8 +41,16 @@ async def lifespan(server):
 INSTRUCTIONS = """Contas são identificadas pelo e-mail Google (flow_list_accounts).
 Antes de qualquer ferramenta que gaste créditos, se houver mais de uma conta e o
 usuário não tiver indicado qual usar nesta solicitação, pergunte qual conta usar.
-Mostre e-mail, saldo (flow_get_credits) e cotação (flow_quote_video) e aguarde a
-confirmação. Nunca escolha a conta por conta própria."""
+Mostre e-mail, saldo (flow_get_credits) e cotação (flow_quote_video ou
+flow_quote_images) e aguarde a confirmação. Nunca escolha a conta por conta própria.
+
+Regras de uso: respostas trazem `status`; em falha leia `error` e siga `next_step`.
+Nunca repita uma geração/edição com status submission_unknown, accepted,
+generation_unknown ou partial_result: use flow_wait_job/flow_recover_job com o
+job_id (flow_list_jobs com o filtro status "pending" lista as pendentes).
+Caminhos de arquivo (entrada e saída) são da máquina onde o MCP roda; flow_status
+mostra qual é e onde ficam os downloads. Em flow_list_accounts,
+keepalive.needs_login=true indica conta que precisa de novo login."""
 
 mcp = MCPServer("google-flow-mcp", instructions=INSTRUCTIONS, lifespan=lifespan)
 
@@ -54,9 +63,39 @@ def resolve_account(account_id: str) -> str:
         return validate_account(account_id)
     matches = [d.name.removeprefix("profile_") for d in root.glob("profile_*")
                if (read_account_file(d) or "").casefold() == account_id.strip().casefold()]
-    if len(matches) != 1:
-        raise ValueError("E-mail não corresponde a uma conta conectada; consulte flow_list_accounts.")
+    if len(matches) > 1:
+        raise ValueError(f"E-mail ligado a mais de um perfil ({', '.join(sorted(matches))}); use o apelido.")
+    if not matches:
+        raise ValueError("E-mail não corresponde a uma conta conectada nesta máquina; consulte flow_list_accounts.")
     return validate_account(matches[0])
+
+
+_LOG_FIELDS = ("status", "error_type", "error", "error_location", "job_id", "recovery_status",
+               "running_action", "quoted_credits")
+
+
+def _log_operation(action: str, account_id: str, result, seconds: float) -> None:
+    """Registro de operações para diagnóstico: só campos seguros, sem prompts, payloads ou URLs.
+
+    Ativo com FLOW_MCP_LOG ou quando existe a pasta logs/ ao lado do home (Pi).
+    """
+    path = os.environ.get("FLOW_MCP_LOG") or (root.parent / "logs" / "operations.jsonl"
+                                              if (root.parent / "logs").is_dir() else None)
+    if not path or not isinstance(result, dict):
+        return
+    from datetime import datetime, timezone
+
+    entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "account_id": account_id,
+             "action": action, "seconds": round(seconds, 1),
+             **{key: result[key] for key in _LOG_FIELDS if result.get(key) is not None}}
+    try:
+        path = Path(path)
+        if path.exists() and path.stat().st_size > 5_000_000:
+            path.replace(path.with_suffix(".1.jsonl"))  # ponytail: uma rotação; logrotate se crescer.
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # Log nunca derruba a operação.
 
 
 async def run_account_operation(action: str, account_id: str = "", session: dict | None = None) -> dict[str, Any]:
@@ -65,12 +104,28 @@ async def run_account_operation(action: str, account_id: str = "", session: dict
             account_id = resolve_account(account_id)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
+    started = asyncio.get_running_loop().time()
     result = await _run_account_operation(action, account_id, session)
+    _log_operation(action, account_id, result, asyncio.get_running_loop().time() - started)
     if action != "list" and isinstance(result, dict):
         from gflow_cli.profile_store import read_account_file
 
         result.setdefault("email", read_account_file(root / f"profile_{account_id}"))
-    return result
+    return with_next_step(result)
+
+
+def read_local_job(account_id: str, job_id: str | None = None, limit: int = 100,
+                   status: str | None = None) -> dict[str, Any]:
+    """Tarefas locais são arquivos JSON desta instância do MCP; leitura sem subprocesso."""
+    from flow_video import get_job, list_jobs
+
+    try:
+        return get_job(account_id, job_id) if job_id is not None else list_jobs(account_id, limit, status)
+    except FileNotFoundError:
+        raise ToolError("Tarefa não encontrada nesta instância do MCP (Windows e Pi guardam tarefas "
+                        "separadas); consulte flow_list_jobs.") from None
+    except (ValueError, KeyError, OSError) as exc:
+        raise ToolError(f"Tarefa ilegível: {exc}") from None
 
 
 async def _run_account_operation(action: str, account_id: str = "", session: dict | None = None) -> dict[str, Any]:
@@ -79,8 +134,15 @@ async def _run_account_operation(action: str, account_id: str = "", session: dic
     # Evita configuração gflow herdada, HARs e .env de outro projeto.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GFLOW_")}
     env.update(GFLOW_CLI_HOME=str(root), GFLOW_CLI_UPDATE_CHECK="false",
-               GFLOW_CLI_INCIDENT_CAPTURE="false", GFLOW_CLI_AUTH_LOGIN_TIMEOUT="600")
-    if action not in {"list", "job", "jobs"}:
+               GFLOW_CLI_INCIDENT_CAPTURE="false", GFLOW_CLI_AUTH_LOGIN_TIMEOUT="600",
+               # O keepalive segura o perfil por até ~25 s a cada 30 min; esperar em vez de falhar.
+               # Outro MCP com worker residente na mesma conta segura o perfil indefinidamente.
+               GFLOW_CLI_LEASE_WAIT_SECONDS="45")
+    if action == "job":
+        return read_local_job(account_id, session["job_id"])
+    if action == "jobs":
+        return read_local_job(account_id, limit=session.get("limit", 100), status=session.get("status"))
+    if action != "list":
         from flow_http import run_worker_operation
 
         return await run_worker_operation(account_id, action, session, env, root)
@@ -92,7 +154,7 @@ async def _run_account_operation(action: str, account_id: str = "", session: dic
     try:
         stdout, _ = await asyncio.wait_for(
             process.communicate(json.dumps(session).encode() if session is not None else None),
-            timeout=1260 if action in {"generate", "images", "edit_image"} else 210 if action in {"recover", "upload_image", "download_asset", "upscale", "download_project"} else 660 if action in {"connect", "import"} else 90,
+            timeout=90,  # Só a listagem de perfis usa este subprocesso.
         )
         return json.loads(stdout)
     except asyncio.TimeoutError:
@@ -106,18 +168,75 @@ async def _run_account_operation(action: str, account_id: str = "", session: dic
             await process.wait()
 
 
+def _code_version() -> str | None:
+    """Commit publicado (app/.deployed na Pi) ou o HEAD do repositório local."""
+    here = Path(__file__).parent
+    try:
+        return (here / ".deployed").read_text(encoding="utf-8").strip()[:40]
+    except OSError:
+        pass
+    try:
+        head = (here / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref: "):
+            return (here / ".git" / head[5:]).read_text(encoding="utf-8").strip()[:12]
+        return head[:12]
+    except OSError:
+        return None
+
+
 @mcp.tool()
 def flow_status() -> dict[str, Any]:
-    """Diagnóstico local: backend instalado não significa sessão autenticada."""
+    """Diagnóstico local: onde o MCP roda, versão e pastas. Não verifica sessões (use flow_account_status)."""
+    import platform
+    import shutil
+    from flow_video import downloads_dir
+
+    try:
+        from gflow_cli.browser_manager import resolved_chrome_binary
+
+        chrome = bool(resolved_chrome_binary())
+    except Exception:
+        chrome = False
+    ffmpeg = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    free_mb = shutil.disk_usage(downloads_dir()).free // 2**20
     return {"backend_status": "accounts_available", "backend": "gflow-cli==0.79.1",
-            "generation_enabled": True,
-            "message": "Vídeo/imagem com orçamento explícito; suporte observado em docs/IMPLEMENTACAO-FLOW.md."}
+            "generation_enabled": True, "host": platform.node(), "platform": platform.system(),
+            "version": _code_version(), "downloads_dir": str(downloads_dir()),
+            "jobs_dir": str(root / "jobs"), "chrome_available": chrome, "ffmpeg_available": ffmpeg,
+            "disk_free_mb": free_mb, **({"warning": "Pouco espaço em disco para downloads."} if free_mb < 2048 else {}),
+            **({} if ffmpeg else {"unavailable_tools": ["flow_save_frame", "flow_export_gif",
+                                                        "flow_build_scene", "flow_upscale"]}),
+            "message": ("Arquivos baixados e caminhos de upload ficam nesta máquina. "
+                        "Vídeo/imagem com orçamento explícito; detalhes em docs/IMPLEMENTACAO-FLOW.md.")}
+
+
+def _keepalive_health() -> dict[str, dict]:
+    """Último resultado do keepalive por conta (só na Pi), sem fingerprints de cookie."""
+    path = Path(os.environ.get("FLOW_MCP_KEEPALIVE_STATE", root.parent / "logs" / "keepalive-state.json"))
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    keys = ("needs_login", "last_ok", "last_credits", "last_check", "last_status", "failures")
+    return {account: {key: value.get(key) for key in keys}
+            for account, value in state.items() if isinstance(value, dict)}
 
 
 @mcp.tool()
 async def flow_list_accounts() -> dict[str, Any]:
-    """Listar contas conectadas com e-mail e apelido do perfil; sessão salva não prova autenticação."""
-    return await run_account_operation("list")
+    """Listar contas conectadas com e-mail e apelido do perfil.
+
+    Sessão salva não prova autenticação. Na Pi, `keepalive` traz a última checagem
+    automática de saldo (a cada 30 min): last_credits é o saldo visto em last_ok e
+    needs_login=true indica conta a relogar. Antes de gastar, confirme o saldo atual
+    com flow_get_credits.
+    """
+    result = await run_account_operation("list")
+    health = _keepalive_health()
+    for account in result.get("accounts", []) if health else []:
+        if account.get("account_id") in health:
+            account["keepalive"] = health[account["account_id"]]
+    return result
 
 
 @mcp.tool()
@@ -175,8 +294,9 @@ async def flow_generate_video(account_id: str, prompt: str, max_credits: int,
     voz é ignorada). character_ids (1–3, de flow_list_characters) usa personagens
     do projeto como ingredientes; exige omni-flash.
     Combinações inválidas são recusadas.
-    Use após autorização de gasto. max_credits é o teto para esta geração;
-    custo desconhecido ou acima do teto impede o envio. Aguarda até 20 minutos.
+    Use após autorização de gasto; cote antes com flow_quote_video (mesmos parâmetros).
+    max_credits é o teto para esta geração; custo desconhecido ou acima do teto
+    impede o envio. Aguarda até 20 minutos; se status não for completed, siga next_step.
     Tarefa persistida em profiles/jobs. Não reenviar se o resultado for incerto.
     project_id opcional reutiliza projeto; sem ele cria um projeto Flow.
     """
@@ -273,7 +393,7 @@ async def flow_quote_video(account_id: str, project_id: str | None = None, opera
     preço do catálogo para a combinação; credits_before é o saldo lido agora.
     """
     if operation not in {"generate", "edit", "extend"}:
-        raise ToolError("Operação de cotação inválida.")
+        raise ToolError("Operação de cotação inválida: use generate, edit ou extend.")
     if operation != "generate" and (not media_id or not project_id):
         raise ToolError("Edição/extensão exige media_id e project_id.")
     payload = {"project_id":project_id, "model":"omni-flash" if operation == "edit" else model,
@@ -286,7 +406,23 @@ async def flow_quote_video(account_id: str, project_id: str | None = None, opera
     result = await run_account_operation("quote_video", account_id, payload)
     return {key: result.get(key) for key in ("account_id", "project_id", "status", "error_type",
             "operation", "model", "duration_seconds", "resolution", "aspect", "count",
-            "quote", "quoted_credits", "credits_before", "email")} | {"operation": operation}
+            "quote", "quoted_credits", "credits_before", "email", "error", "message",
+            "next_step")} | {"operation": operation}
+
+
+@mcp.tool()
+async def flow_quote_images(account_id: str, model: str = "nano-banana-2", aspect: str = "16:9",
+                            count: int = 1, with_references: bool = False,
+                            project_id: str | None = None) -> dict[str, Any]:
+    """Cotar a geração de 1–4 imagens pelo catálogo HTTP, sem enviar nem gastar.
+
+    Modelos: nano-banana-2, nano-banana-2-lite, nano-pro. with_references=True cota
+    com imagens de referência. Sem project_id usa o projeto mais recente da conta.
+    Use quoted_credits como max_credits em flow_generate_images.
+    """
+    return await run_account_operation("quote_images", account_id, {
+        "model": model, "aspect": aspect, "count": count, "with_references": with_references,
+        "project_id": project_id})
 
 
 @mcp.tool()
@@ -635,8 +771,9 @@ async def flow_generate_images(account_id: str, prompt: str, max_credits: int = 
     Proporções: 16:9, 9:16, 1:1, 4:3, 3:4.
     Referências: caminhos locais ou IDs de imagens já presentes no project_id.
     Referências por ID não enviam novamente o arquivo.
-    max_credits limita o pedido inteiro, inclusive quando o custo observado é zero.
-    Não reenviar tarefa com resultado incerto. Aguarda até 20 minutos.
+    max_credits limita o pedido inteiro, inclusive quando o custo observado é zero;
+    cote antes com flow_quote_images. Não reenviar tarefa com resultado incerto
+    (siga next_step). Aguarda até 20 minutos.
     """
     return await run_account_operation("images", account_id,
         {"prompt": prompt, "max_credits": max_credits, "project_id": project_id,
@@ -645,13 +782,15 @@ async def flow_generate_images(account_id: str, prompt: str, max_credits: int = 
 
 
 @mcp.tool()
-async def flow_list_jobs(account_id: str, limit: int = 100) -> dict[str, Any]:
+async def flow_list_jobs(account_id: str, limit: int = 100, status: str | None = None) -> dict[str, Any]:
     """Listar tarefas locais desta conta, inclusive após reiniciar o MCP.
 
     Ordenadas por observação mais recente. Não consulta tarefas externas ao MCP
     nem reenvia geração. Útil para localizar uma tarefa cujo retorno foi interrompido.
+    status filtra por um estado exato ou "pending" (incertas/em andamento, a
+    reconciliar com flow_wait_job/flow_recover_job, nunca reenviar).
     """
-    return await run_account_operation("jobs", account_id, {"limit": limit})
+    return await run_account_operation("jobs", account_id, {"limit": limit, "status": status})
 
 
 @mcp.tool()
@@ -680,46 +819,55 @@ async def flow_wait_job(account_id: str, job_id: str, timeout_seconds: int = 60,
 
     timeout_seconds=0 faz apenas uma consulta; máximo 600, intervalo de 2–60s.
     O prazo limita novas consultas; uma consulta/download em andamento pode
-    excedê-lo. wait_status informa completed, stopped, unavailable ou timeout;
+    excedê-lo. wait_status informa completed, stopped, unavailable, not_found (aceita
+    mas ausente do Flow em 3 consultas seguidas) ou timeout;
     o status original da tarefa é preservado no timeout. Cancelamento é local.
     """
-    from flow_video import get_job
-
     if (type(timeout_seconds) is not int or not 0 <= timeout_seconds <= 600
             or type(poll_interval_seconds) is not int or not 2 <= poll_interval_seconds <= 60):
         raise ToolError("Use prazo inteiro de 0–600s e intervalo inteiro de 2–60s.")
     try:
         account_id = resolve_account(account_id)
-        job = get_job(account_id, job_id)
-    except (ValueError, OSError) as exc:
+    except ValueError as exc:
         raise ToolError(str(exc)) from None
+    job = read_local_job(account_id, job_id)
     deadline = asyncio.get_running_loop().time() + timeout_seconds
-    polls = 0
+    polls = not_found = 0
     while True:
         if job.get("status") in {"completed", "cancelled", "generation_failed", "failed_pre_submit",
                                   "reference_confirmation_required", "reference_upload_unknown"}:
-            return {**job, "wait_status": "completed" if job["status"] == "completed" else "stopped",
-                    "polls": polls}
+            return with_next_step({**job, "polls": polls,
+                                   "wait_status": "completed" if job["status"] == "completed" else "stopped"})
         if not (job.get("request_media_ids") or job.get("media_ids") or job.get("media_id")):
-            return {**job, "wait_status": "unavailable", "polls": polls}
+            return with_next_step({**job, "wait_status": "unavailable", "polls": polls})
         if polls and asyncio.get_running_loop().time() >= deadline:
-            return {**job, "wait_status": "timeout", "polls": polls}
+            return with_next_step({**job, "wait_status": "timeout", "polls": polls})
         result = await run_account_operation("recover", account_id, {"job_id": job_id})
         polls += 1
-        if result.get("job_id") != job_id:
-            return {**job, "wait_status": "unavailable", "polls": polls,
-                    "wait_error_status": result.get("status")}
-        job = result
-        if job.get("status") in {"completed", "cancelled", "generation_failed", "failed_pre_submit"}:
-            continue
-        if job.get("recovery_status") == "unavailable":
-            return {**job, "wait_status": "unavailable", "polls": polls}
+        if result.get("status") == "account_busy":
+            # A própria geração (ou outra operação) ainda ocupa a conta: continuar esperando.
+            job = {**job, "account_busy": result.get("running_action")}
+        elif result.get("job_id") != job_id:
+            return with_next_step({**job, "wait_status": "unavailable", "polls": polls,
+                                   "wait_error_status": result.get("status"),
+                                   "wait_error": result.get("error") or result.get("message")})
+        else:
+            job = result
+            if job.get("status") in {"completed", "cancelled", "generation_failed", "failed_pre_submit"}:
+                continue
+            if job.get("recovery_status") == "unavailable":
+                return with_next_step({**job, "wait_status": "unavailable", "polls": polls})
+            not_found = not_found + 1 if job.get("recovery_status") == "not_found" else 0
+            if not_found >= 3:
+                # Aceita pelo Flow, mas ausente do projeto e do acompanhamento em consultas seguidas.
+                return {**job, "wait_status": "not_found", "polls": polls,
+                        "next_step": job.get("recovery_message")}
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
-            return {**job, "wait_status": "timeout", "polls": polls}
+            return with_next_step({**job, "wait_status": "timeout", "polls": polls})
         await asyncio.sleep(min(poll_interval_seconds, remaining))
         # Releitura observa cancelamentos locais e resultados de outras consultas.
-        job = get_job(account_id, job_id)
+        job = read_local_job(account_id, job_id)
 
 
 @mcp.tool()
@@ -727,17 +875,23 @@ def flow_cancel_job(account_id: str, job_id: str) -> dict[str, Any]:
     """Cancelar localmente uma tarefa pendente para evitar recuperação indevida."""
     from flow_scene import cancel_job
     try:
-        return cancel_job(account_id, job_id)
+        return cancel_job(resolve_account(account_id), job_id)
     except (ValueError, FileNotFoundError, OSError) as exc:
         raise ToolError(str(exc)) from None
 
 
 @mcp.tool()
 def flow_clean_jobs(account_id: str, status_filter: str | None = None) -> dict[str, Any]:
-    """Limpar tarefas locais concluídas ou canceladas para liberar espaço em disco."""
+    """Limpar tarefas locais concluídas ou canceladas para liberar espaço em disco.
+
+    status_filter: completed, cancelled, failed, failed_pre_submit, generation_failed,
+    uncertain, submission_unknown ou partial_result. Os filtros de tarefas incertas
+    apagam a única evidência para recuperar mídia possivelmente já cobrada: use-os só
+    após flow_recover_job e com pedido explícito do usuário.
+    """
     from flow_scene import clean_jobs
     try:
-        return clean_jobs(account_id, status_filter)
+        return clean_jobs(resolve_account(account_id), status_filter)
     except (ValueError, OSError) as exc:
         raise ToolError(str(exc)) from None
 

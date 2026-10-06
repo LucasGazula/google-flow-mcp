@@ -216,7 +216,11 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(result, {"projects": [{"project_id": "legacy_backfill", "title": "Título"}], "complete": True})
         self.assertFalse(parse_projects([rows, "cursor must stay private"])["complete"])
         self.assertEqual(parse_projects([[]])["projects"], [])
-        for payload in (None, [], {}, [["bad row"]], [[["../escape", ["Title"]]]]):
+        self.assertEqual(parse_projects([None])["projects"], [])  # conta sem projetos
+        # Linhas inválidas (inclusive IDs que escapariam da rota) são ignoradas, não derrubam a lista.
+        self.assertEqual(parse_projects([[["bad row"], ["../escape", ["Title"]], *rows]])["projects"],
+                         [{"project_id": "legacy_backfill", "title": "Título"}])
+        for payload in (None, [], {}, ["not a list"]):
             with self.assertRaises(ValueError):
                 parse_projects(payload)
 

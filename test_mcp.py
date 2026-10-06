@@ -36,7 +36,7 @@ class MCPSmokeTest(unittest.IsolatedAsyncioTestCase):
                     "flow_generate_video", "flow_generate_images", "flow_get_job", "flow_recover_job", "flow_wait_job",
                     "flow_create_project", "flow_rename_project", "flow_delete_project", "flow_list_collections", "flow_create_collection", "flow_rename_collection", "flow_move_assets", "flow_get_capabilities", "flow_list_projects", "flow_list_jobs",
                     "flow_list_assets", "flow_search_assets", "flow_upload_image", "flow_upload_asset", "flow_confirm_upload", "flow_download_asset", "flow_delete_asset", "flow_get_asset", "flow_edit_image", "flow_edit_images",
-                    "flow_edit_video", "flow_refine_video", "flow_extend_video", "flow_quote_video", "flow_crop_image", "flow_upscale_image", "flow_upscale_video",
+                    "flow_edit_video", "flow_refine_video", "flow_extend_video", "flow_quote_video", "flow_quote_images", "flow_crop_image", "flow_upscale_image", "flow_upscale_video",
                     "flow_cancel_job", "flow_clean_jobs", "flow_save_frame", "flow_export_gif", "flow_build_scene",
                     "flow_manage_scene", "flow_list_scenes", "flow_export_scene", "flow_list_characters", "flow_list_voice_presets", "flow_manage_character",
                     "flow_get_agent_brief", "flow_update_agent_brief",
@@ -60,6 +60,8 @@ class MCPSmokeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.is_error)
                 self.assertEqual(result.structured_content["backend_status"], "accounts_available")
                 self.assertTrue(result.structured_content["generation_enabled"])
+                for key in ("host", "downloads_dir", "jobs_dir", "ffmpeg_available", "disk_free_mb"):
+                    self.assertIn(key, result.structured_content)
                 accounts = await client.call_tool("flow_list_accounts", {})
                 self.assertFalse(accounts.is_error)
                 self.assertEqual(accounts.structured_content["accounts"], [])
@@ -164,6 +166,72 @@ class MCPSmokeTest(unittest.IsolatedAsyncioTestCase):
 
             await app({"type": "http", "path": "/mcp", "headers": headers}, AsyncMock(), send)
             self.assertEqual(sent[0]["status"], 401)
+
+    async def test_local_jobs_are_read_in_process_with_clear_errors(self) -> None:
+        from gflow_cli.config import get_settings
+        from flow_mcp import flow_cancel_job
+
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"GFLOW_CLI_HOME": home}):
+            get_settings.cache_clear()
+            try:
+                profile = Path(home) / "profile_conta-x"
+                profile.mkdir()
+                (profile / ".gflow_account").write_text("pessoa@example.com", encoding="utf-8")
+                job_id = str(uuid4())
+                (Path(home) / "jobs").mkdir()
+                (Path(home) / "jobs" / f"{job_id}.json").write_text(json.dumps(
+                    {"job_id": job_id, "account_id": "conta-x", "kind": "image", "status": "submission_unknown"}))
+                with patch("flow_mcp.root", Path(home)):
+                    job = await run_account_operation("job", "pessoa@example.com", {"job_id": job_id})
+                    self.assertEqual(job["status"], "submission_unknown")
+                    self.assertIn("NÃO repita", job["next_step"])
+                    listed = await run_account_operation("jobs", "conta-x", {"limit": 5})
+                    self.assertEqual(listed["jobs"][0]["job_id"], job_id)
+                    pending = await run_account_operation("jobs", "conta-x", {"limit": 5, "status": "pending"})
+                    self.assertEqual([j["job_id"] for j in pending["jobs"]], [job_id])
+                    done = await run_account_operation("jobs", "conta-x", {"limit": 5, "status": "completed"})
+                    self.assertEqual(done["jobs"], [])
+                    with self.assertRaises(ToolError) as ctx:
+                        await run_account_operation("job", "conta-x", {"job_id": str(uuid4())})
+                    self.assertIn("flow_list_jobs", str(ctx.exception))
+                    self.assertEqual(flow_cancel_job("pessoa@example.com", job_id)["status"], "cancelled")
+                    from flow_video import recover_job, save_job
+
+                    unsent = {"job_id": str(uuid4()), "account_id": "conta-x", "kind": "video",
+                              "video_id_schema": "media-workflow-v1", "status": "failed_pre_submit",
+                              "project_id": None}
+                    save_job(unsent)
+                    recovered = await recover_job("conta-x", unsent["job_id"])
+                    self.assertEqual(recovered["recovery_status"], "nothing_to_recover")
+            finally:
+                get_settings.cache_clear()
+
+    async def test_account_listing_includes_keepalive_health_without_fingerprints(self) -> None:
+        from flow_mcp import flow_list_accounts
+
+        with tempfile.TemporaryDirectory() as home:
+            state = Path(home) / "state.json"
+            state.write_text(json.dumps({"ddv1": {"failures": 0, "last_ok": "t", "last_fp": "secretfp",
+                                                  "needs_login": False, "rotations": 1}}))
+            listing = {"accounts": [{"account_id": "ddv1"}, {"account_id": "ddv2"}]}
+            with patch.dict(os.environ, {"FLOW_MCP_KEEPALIVE_STATE": str(state)}), \
+                    patch("flow_mcp.run_account_operation", AsyncMock(return_value=listing)):
+                result = await flow_list_accounts()
+        self.assertFalse(result["accounts"][0]["keepalive"]["needs_login"])
+        self.assertNotIn("secretfp", json.dumps(result))
+        self.assertNotIn("keepalive", result["accounts"][1])
+
+    async def test_operations_log_keeps_only_safe_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            log = Path(home) / "ops.jsonl"
+            reply = {"status": "http_error", "error": "Modelo inválido", "prompt": "segredo do usuário",
+                     "files": ["/x"], "job_id": "j1"}
+            with patch.dict(os.environ, {"FLOW_MCP_LOG": str(log)}), \
+                    patch("flow_mcp._run_account_operation", AsyncMock(return_value=reply)):
+                await run_account_operation("generate", "conta-a", {"prompt": "segredo do usuário"})
+            entry = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual((entry["action"], entry["status"], entry["job_id"]), ("generate", "http_error", "j1"))
+        self.assertNotIn("segredo", json.dumps(entry, ensure_ascii=False))
 
     def test_instructions_prompt_for_account_selection_before_spending_credits(self) -> None:
         self.assertIn("Antes de qualquer ferramenta que gaste créditos", INSTRUCTIONS)

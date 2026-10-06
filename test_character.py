@@ -286,7 +286,7 @@ class CharacterTest(unittest.IsolatedAsyncioTestCase):
         result = await manage_character("conta-a", project, "remove_image", entity_id=entity,
                                         slot="portrait", client=client)
         self.assertEqual(result["status"], "failed_pre_submit")
-        self.assertEqual(result["message"], "O slot do personagem já está vazio.")
+        self.assertEqual(result["error"], "O slot do personagem já está vazio.")
         self.assertFalse(result["retry_automatically"])
         # Chamou apenas a leitura inicial Zzl0ze, sem rpc de mutação
         self.assertEqual(len(client.rpc.await_args_list), 1)

@@ -85,9 +85,13 @@ class AgentSessionsTest(unittest.IsolatedAsyncioTestCase):
         client.rpc.assert_awaited_once_with("mrlkwd", params=["projeto-a"])
 
     async def test_list_rejects_malformed_session_identity(self):
-        client = SimpleNamespace(account_id="conta-a", rpc=AsyncMock(return_value=[[["../unsafe", ["Title"]]]]))
-        with self.assertRaises(ValueError):
-            await list_agent_sessions("conta-a", "projeto-a", client=client)
+        client = SimpleNamespace(account_id="conta-a", rpc=AsyncMock(
+            return_value=[[["../unsafe", ["Title"]], ["sessao-1", ["Ok"]]]]))
+        result = await list_agent_sessions("conta-a", "projeto-a", client=client)
+        # ID inseguro nunca sai; a sessão válida continua listada.
+        self.assertEqual(result["sessions"], [{"session_id": "sessao-1", "title": "Ok"}])
+        client.rpc.return_value = [None]
+        self.assertEqual((await list_agent_sessions("conta-a", "projeto-a", client=client))["sessions"], [])
 
     async def test_rename_sends_once_and_confirms_with_project_listing(self):
         client = SimpleNamespace(account_id="conta-a", rpc=AsyncMock(side_effect=[
@@ -244,9 +248,8 @@ class ToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([tool["title"] for tool in result["tools"]], ["Spotlight"])
         with self.assertRaises(ValueError):
             await list_tools("conta-a", "other", client=client)
-        payload[0][0][12] = 9
-        with self.assertRaises(ValueError):
-            await list_tools("conta-a", client=client)
+        payload[0][0][12] = 9  # categoria nova do Flow: só essa ferramenta some
+        self.assertNotIn("Mine", [tool["tool_id"] for tool in (await list_tools("conta-a", client=client))["tools"]])
 
 
 class AgentStreamTest(unittest.TestCase):

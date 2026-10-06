@@ -1,13 +1,14 @@
 """Edição e histórico de imagens no editor atual do Flow."""
 
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 from uuid import uuid4
 
+from flow_errors import error_fields
 from flow_assets import media_uuid, parse_assets
 from flow_projects import validate_project
-from flow_video import generation_quote, image_suffix, original_image_url, save_job
+from flow_video import (IMAGE_MODELS, downloads_dir, generation_quote, image_suffix, normalize_model,
+                        original_image_url, save_job)
 
 
 def image_versions(payload, media_id, project_id):
@@ -116,8 +117,7 @@ async def edit_image(account_id: str, project_id: str, media_id: str, prompt: st
         raise ValueError("Informe um orçamento inteiro não negativo.")
     if type(count) is not int or not 1 <= count <= 4:
         raise ValueError("A quantidade deve estar entre 1 e 4.")
-    if model not in {"nano-banana-2", "nano-banana-2-lite", "nano-pro"}:
-        raise ValueError("Modelo inválido.")
+    model = normalize_model(model, IMAGE_MODELS)
     Model.from_cli("nano-banana-2" if model == "nano-banana-2-lite" else model)
     Aspect.from_cli(aspect)
     validate_annotations(selection, drawings)
@@ -197,8 +197,7 @@ async def edit_image(account_id: str, project_id: str, media_id: str, prompt: st
                    workflow_id=workflow_id, media_ids=[r.media_id for r in records],
                    workflow_ids=[r.workflow_id for r in records], rpc=packet["rpc_id"])
         save_job(job)
-        output = Path(os.environ.get("FLOW_MCP_OUTPUT",Path(__file__).parent/"downloads")).resolve()
-        output.mkdir(parents=True, exist_ok=True)
+        output = downloads_dir()
         for record in records:
             body = await client.download(original_image_url(record.image_url), record.media_id)
             path = output/(record.media_id+image_suffix(body))
@@ -208,7 +207,8 @@ async def edit_image(account_id: str, project_id: str, media_id: str, prompt: st
             save_job(job)
         job["status"] = "completed" if len(records) == count else "partial_result"
     except Exception as exc:
-        job.update(error_type=type(exc).__name__, failure_stage=job["status"],
+        job.update(error_fields(exc))
+        job.update(failure_stage=job["status"],
             status={"preparing":"failed_pre_submit","submitting":"submission_unknown",
                     "downloading":"download_failed"}.get(job["status"],job["status"]))
     finally:
@@ -245,8 +245,7 @@ async def edit_images(account_id: str, project_id: str, media_ids: list[str], pr
         raise ValueError("Informe um prompt de até 4000 caracteres.")
     if type(max_credits) is not int or max_credits < 0:
         raise ValueError("Informe um orçamento inteiro não negativo.")
-    if model not in {"nano-banana-2", "nano-banana-2-lite", "nano-pro"}:
-        raise ValueError("Modelo inválido.")
+    model = normalize_model(model, IMAGE_MODELS)
     Model.from_cli("nano-banana-2" if model == "nano-banana-2-lite" else model)
     Aspect.from_cli(aspect)
     if client is not None and client.account_id != account_id:
@@ -295,7 +294,7 @@ async def edit_images(account_id: str, project_id: str, media_ids: list[str], pr
                 client=client)
             summary = {key:child.get(key) for key in (
                 "job_id", "status", "media_id", "media_ids", "request_media_ids",
-                "files", "quoted_credits", "error_type")}
+                "files", "quoted_credits", "error_type", "error")}
             summary["source_media_id"] = media_id
             job["subjobs"].append(summary)
             job["request_media_ids"].extend(child.get("request_media_ids", []))
@@ -316,13 +315,18 @@ async def edit_images(account_id: str, project_id: str, media_ids: list[str], pr
             job["current_subjob_id"] = child["job_id"]
             save_job(job)
             if child.get("status") != "completed":
-                job["status"] = child.get("status") or "partial_result"
-                job["failure_stage"] = job["status"]
+                status = child.get("status") or "partial_result"
+                # Imagens anteriores do lote já foram enviadas: o lote não é "nada enviado".
+                if status == "failed_pre_submit" and len(job["subjobs"]) > 1:
+                    status = "partial_result"
+                job.update(status=status, failure_stage=child.get("status"),
+                           **({"error": child["error"]} if child.get("error") else {}))
                 break
         else:
             job["status"] = "completed"
     except Exception as exc:
-        job.update(error_type=type(exc).__name__, failure_stage=job["status"],
+        job.update(error_fields(exc))
+        job.update(failure_stage=job["status"],
                    status="failed_pre_submit" if job["status"] in {"preparing", "submitting"}
                    and not job["subjobs"] else "partial_result")
     finally:
@@ -377,12 +381,12 @@ async def crop_image(account_id, project_id, media_id, coordinates, *, client):
         download_payload = readback if output_asset else rows[0]
         body = await client.download(original_image_url(image_download_url(
             download_payload,project_id,new_id)),new_id)
-        output=Path(os.environ.get('FLOW_MCP_OUTPUT',Path(__file__).parent/'downloads')).resolve()
-        output.mkdir(parents=True,exist_ok=True)
+        output=downloads_dir()
         target=output/(new_id+image_suffix(body));target.write_bytes(body)
         job.update(status='completed',files=[str(target)],bytes=len(body))
     except Exception as exc:
-        job.update(error_type=type(exc).__name__,failure_stage=job['status'],
+        job.update(error_fields(exc))
+        job.update(failure_stage=job['status'],
             status={'preparing':'failed_pre_submit','submitting':'submission_unknown',
                     'downloading':'download_failed'}.get(job['status'],job['status']))
     save_job(job)
@@ -488,15 +492,14 @@ async def upscale_image_native(account_id, project_id, media_id,
                 raise ValueError("Resposta do upscale não contém PNG/JPEG.")
             job["status"] = "saving"
             save_job(job)
-            output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-            output.mkdir(parents=True, exist_ok=True)
+            output = downloads_dir()
             target = output / f"upscale_{media_id}_{target_resolution}{image_suffix(image)}"
             target.write_bytes(image)
             job.update(status="completed", output_path=str(target), files=[str(target)], bytes=len(image))
         except Exception as exc:
             job.update(status={"preparing":"failed_pre_submit", "submitting":"submission_unknown",
                                "saving":"output_save_failed"}.get(job["status"], job["status"]),
-                       error_type=type(exc).__name__, retry_automatically=False)
+                       retry_automatically=False, **error_fields(exc))
             save_job(job)
             return job
         save_job(job)
@@ -508,7 +511,7 @@ async def upscale_image_native(account_id, project_id, media_id,
         try:
             uploaded = await upload_image(account_id, project_id, job["output_path"], client=client)
         except Exception as exc:
-            job.update(flow_upload_status="failed", flow_upload_error_type=type(exc).__name__)
+            job.update(flow_upload_status="failed", **error_fields(exc, "flow_upload_"))
         else:
             job["flow_upload_status"] = uploaded.get("status") or "submission_unknown"
             if uploaded.get("media_id"):

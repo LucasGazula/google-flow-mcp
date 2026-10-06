@@ -19,6 +19,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: uv run --locked python -m unittest
+      - name: Nomes indefinidos (pyflakes)
+        # Os testes usam mocks; um NameError num caminho pouco exercitado só apareceria em produção.
+        run: "! uvx pyflakes==3.2.0 *.py deploy/*.py | grep -E 'undefined name|referenced before assignment'"
 
   deploy:
     needs: test
@@ -28,8 +31,11 @@ jobs:
       - name: Atualizar app e dependências
         run: |
           source /mnt/ssd/flow-mcp/env.sh
-          # Perfis, logs e downloads ficam fora de app/; --delete só remove código antigo.
-          rsync -a --delete --exclude .git --exclude .github --exclude __pycache__ ./ "$HOME_FLOW/app/"
+          # --delete só remove código antigo. Pastas de execução são protegidas (rsync não apaga excluídos):
+          # sem FLOW_MCP_OUTPUT, os downloads ficam em app/downloads e sumiriam a cada deploy.
+          rsync -a --delete --exclude .git --exclude .github --exclude __pycache__ \
+            --exclude /downloads --exclude /profiles --exclude /exports --exclude /logs \
+            --exclude /keepalive.log --exclude /keepalive-state.json ./ "$HOME_FLOW/app/"
           cd "$HOME_FLOW/app" && uv sync --locked
       - name: Conferir importação do servidor
         run: |
@@ -39,3 +45,10 @@ jobs:
         run: |
           sudo -n systemctl restart flow-mcp
           sleep 10 && systemctl is-active flow-mcp
+          # Servidor no ar de fato: sem token, /mcp responde 401 (crash em loop não responde).
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp || true)
+            [ "$code" = 401 ] && exit 0
+            sleep 5
+          done
+          echo "flow-mcp não respondeu em /mcp (último código: $code)"; exit 1

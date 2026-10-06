@@ -1,6 +1,7 @@
 """Gestão de personagens e referências visuais no projeto Flow."""
 
 from flow_accounts import validate_account
+from flow_errors import error_fields, tolerant_rows
 from flow_projects import validate_project
 
 
@@ -16,10 +17,10 @@ def parse_characters(payload, project_id):
     """Personagens da sexta seção de Zzl0ze: [projeto, id, _, [1, nome, refs], capa, dimensões, ...]."""
     from flow_assets import media_uuid
 
-    if not isinstance(payload, list) or len(payload) != 8:
+    if not isinstance(payload, list) or len(payload) < 8:  # Seções novas no fim não invalidam.
         raise ValueError("Resposta de personagens não reconhecida.")
-    characters = []
-    for row in payload[5] or []:
+
+    def parse(row):
         if (not isinstance(row, list) or len(row) < 5 or row[0] != project_id
                 or not isinstance(row[3], list) or len(row[3]) < 2 or not isinstance(row[3][1], str)):
             raise ValueError("Personagem não reconhecido.")
@@ -30,14 +31,15 @@ def parse_characters(payload, project_id):
         # Posicional: [retrato, corpo]; slot vazio vem como [].
         slots = [media_uuid(ref[0]) if ref else None for ref in info[0] or []]
         slots += [None] * (2 - len(slots))
-        characters.append({"entity_id":media_uuid(row[1]), "project_id":project_id,
-                           "display_name":row[3][1],
-                           "reference_media_ids":[slot for slot in slots if slot],
-                           "portrait_media_id":slots[0], "body_media_id":slots[1],
-                           "voice":voices[0][1] if voices and isinstance(voices[0], list) and len(voices[0]) > 1 else None,
-                           "personality":info[2] if isinstance(info[2], str) else None,
-                           "thumbnail_media_id":media_uuid(row[4]) if row[4] else None})
-    return characters
+        return {"entity_id":media_uuid(row[1]), "project_id":project_id,
+                "display_name":row[3][1],
+                "reference_media_ids":[slot for slot in slots if slot],
+                "portrait_media_id":slots[0], "body_media_id":slots[1],
+                "voice":voices[0][1] if voices and isinstance(voices[0], list) and len(voices[0]) > 1 else None,
+                "personality":info[2] if isinstance(info[2], str) else None,
+                "thumbnail_media_id":media_uuid(row[4]) if row[4] else None}
+
+    return tolerant_rows(payload[5], parse)
 
 
 def _validate_name(value: str | None) -> None:
@@ -127,6 +129,8 @@ async def manage_character(account_id: str, project_id: str, operation: str,
     elif description is not None and operation != "set_image":
         raise ValueError("description só é usada na criação e em set_image.")
     else:
+        if entity_id is None:
+            raise ValueError(f"operation={operation} exige entity_id (de flow_list_characters).")
         media_uuid(entity_id)
         if operation == "set_image":
             if (image_media_id is None) == (description is None):
@@ -279,9 +283,7 @@ async def manage_character(account_id: str, project_id: str, operation: str,
         return result
     except Exception as exc:
         job.update(status="failed_pre_submit" if job["status"] == "preparing" else "submission_unknown",
-                   error_type=type(exc).__name__, retry_automatically=False)
-        if job["status"] == "failed_pre_submit" and isinstance(exc, ValueError):
-            job["message"] = str(exc)
+                   retry_automatically=False, **error_fields(exc))
         save_job(job)
         return job
     finally:

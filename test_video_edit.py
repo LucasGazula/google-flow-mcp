@@ -458,6 +458,60 @@ class VideoEditTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 get_settings.cache_clear()
 
+    async def test_polling_tolerates_brief_tracking_lag_after_acceptance(self):
+        from gflow_cli.config import get_settings
+
+        project, source, workflow, output = (str(uuid4()) for _ in range(4))
+        data = [None, [], [video_row(project, source, workflow)], None, None, None, None, None]
+        body = b"1234ftypmp42original!"
+        done = video_row(project, output, workflow, revision="CAI")
+        done[5][13] = len(body)
+        tracking = iter([[], [], done])  # acompanhamento vazio duas vezes, depois pronto
+
+        async def rpc_handler(rpc_id, **kwargs):
+            if rpc_id == "as29s":
+                return next(tracking)
+            return data if rpc_id == "Zzl0ze" else [90, None, None, 2, None, None, None]
+
+        async def quote(client, job, features):
+            job.update(quoted_credits=10, credits_before=100)
+            return {"model_key": "abra_edit", "quoted_credits": 10}
+
+        accepted = video_row(project, output, workflow, revision="CAI", status=2)  # em andamento
+        client = SimpleNamespace(account_id="conta-a", rpc=AsyncMock(side_effect=rpc_handler),
+                                 prepare=AsyncMock(return_value="captcha"), status_from_submit=lambda *a: None,
+                                 download=AsyncMock(return_value=body), close=AsyncMock(),
+                                 request=lambda rpc, params: {"rpc_id": rpc, "params": params},
+                                 send_submit=AsyncMock(return_value=accepted))
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"GFLOW_CLI_HOME": home, "FLOW_MCP_OUTPUT": home}), \
+             patch("flow_video.generation_quote", side_effect=quote), patch("flow_video.asyncio.sleep", AsyncMock()), \
+             patch("flow_requests._seed", side_effect=[("media-seed", output), ("workflow-seed", workflow)]):
+            get_settings.cache_clear()
+            try:
+                job = await generate_video("conta-a", "Mudar luz", 20, project_id=project, model="omni-flash",
+                                           operation="edit", source_media_id=source, segment_start=1,
+                                           segment_end=5, client=client)
+            finally:
+                get_settings.cache_clear()
+        self.assertEqual(job["status"], "completed")
+        client.send_submit.assert_awaited_once()
+        # Mídia que nunca aparece: para após ~6 consultas com orientação clara, sem reenviar.
+        tracking = iter([[]] * 10)
+        client.send_submit.reset_mock()
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"GFLOW_CLI_HOME": home, "FLOW_MCP_OUTPUT": home}), \
+             patch("flow_video.generation_quote", side_effect=quote), patch("flow_video.asyncio.sleep", AsyncMock()), \
+             patch("flow_requests._seed", side_effect=[("media-seed", output), ("workflow-seed", workflow)]):
+            get_settings.cache_clear()
+            try:
+                lost = await generate_video("conta-a", "Mudar luz", 20, project_id=project, model="omni-flash",
+                                            operation="edit", source_media_id=source, segment_start=1,
+                                            segment_end=5, client=client)
+            finally:
+                get_settings.cache_clear()
+        self.assertEqual(lost["status"], "generation_unknown")
+        self.assertIn("perdido", lost["error"])
+        client.send_submit.assert_awaited_once()
+
     async def test_completed_generation_keeps_completed_status_when_nzlxg_fails(self):
         from gflow_cli.config import get_settings
 

@@ -16,6 +16,8 @@ exports/
 storage_state*.json
 cookies*.json
 *.log
+logs/
+keepalive-state.*
 # Sondagens locais de validação não fazem parte do servidor.
 .probe_*.py
 .validate_*.py

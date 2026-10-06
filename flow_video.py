@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from gflow_cli.api.transports.migrated_composer import MigratedComposer
 from flow_browser import account_page
+from flow_errors import error_fields
 from flow_projects import validate_project
 
 
@@ -50,9 +51,34 @@ class BudgetedComposer(MigratedComposer):
 def job_path(job_id: str) -> Path:
     from gflow_cli.config import get_settings
 
-    if str(UUID(job_id)) != job_id:
-        raise ValueError("Identificador de tarefa inválido.")
+    try:
+        valid = str(UUID(job_id)) == job_id
+    except (ValueError, TypeError, AttributeError):
+        valid = False
+    if not valid:
+        raise ValueError(f"job_id inválido ({str(job_id)[:80]!r}); use um job_id de flow_list_jobs.")
     return get_settings().home / "jobs" / f"{job_id}.json"
+
+
+VIDEO_MODELS = ("veo-lite", "veo-fast", "veo-quality", "omni-flash")
+IMAGE_MODELS = ("nano-banana-2", "nano-banana-2-lite", "nano-pro")
+_MODEL_ALIASES = {"nano-banana-pro": "nano-pro", "omni": "omni-flash"}
+
+
+def normalize_model(model, allowed) -> str:
+    """Aceitar variações comuns (omni_flash, Nano Banana Pro) e listar as opções no erro."""
+    value = "-".join(model.strip().lower().replace("_", " ").split()) if isinstance(model, str) else model
+    value = _MODEL_ALIASES.get(value, value)
+    if value not in allowed:
+        raise ValueError(f"Modelo inválido ({model!r}); use {', '.join(allowed)}.")
+    return value
+
+
+def downloads_dir() -> Path:
+    """Pasta dos arquivos baixados, na máquina do MCP (FLOW_MCP_OUTPUT ou ./downloads)."""
+    output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    return output
 
 
 def save_job(job: dict) -> None:
@@ -115,8 +141,9 @@ async def upscale_video(account_id: str, project_id: str, media_id: str,
                     job.update(status="completed", path=downloaded["path"], bytes=downloaded["bytes"])
                     save_job(job)
                 return {**result, **downloaded}
-            except Exception:
-                return {**result, "status": "accepted", "message": "Vídeo aprimorado visto; download ainda indisponível."}
+            except Exception as exc:
+                return {**result, "status": "accepted", **error_fields(exc),
+                        "message": "Vídeo aprimorado visto; download ainda indisponível."}
         if job:
             return {**result, "status": job["status"],
                     "message": "Envio anterior registrado; consulte novamente para recuperar, sem reenviar."}
@@ -136,10 +163,10 @@ async def upscale_video(account_id: str, project_id: str, media_id: str,
         save_job(job)
         try:
             await client.send_submit(captured)
-        except Exception:
-            job["status"] = "submission_unknown"
+        except Exception as exc:
+            job.update(status="submission_unknown", **error_fields(exc))
             save_job(job)
-            return {**result, "status": "submission_unknown",
+            return {**result, "status": "submission_unknown", **error_fields(exc),
                     "message": "Envio inconclusivo; consulte novamente para reconciliar, sem reenviar."}
         job["status"] = "accepted"
         save_job(job)
@@ -168,21 +195,31 @@ def get_job(account_id: str, job_id: str) -> dict:
     return job
 
 
-def list_jobs(account_id: str, limit: int = 100) -> dict:
+# Estados em que a tarefa ainda pode ter resultado a reconciliar (nunca reenviar).
+PENDING_STATUSES = {"preparing", "submitting", "accepted", "downloading", "submission_unknown",
+                    "generation_unknown", "partial_result", "download_failed"}
+
+
+def list_jobs(account_id: str, limit: int = 100, status: str | None = None) -> dict:
     from flow_accounts import validate_account
 
     validate_account(account_id)
     if type(limit) is not int or not 1 <= limit <= 500:
         raise ValueError("Informe um limite de 1 a 500 tarefas.")
+    if status is not None and not isinstance(status, str):
+        raise ValueError("status deve ser texto (ex.: pending, completed, submission_unknown).")
     jobs = []
     for path in job_path(str(uuid4())).parent.glob("*.json"):
         try:
             job = get_job(account_id, path.stem)
         except (ValueError, OSError, KeyError):
             continue
+        if status == "pending" and job.get("status") not in PENDING_STATUSES or (
+                status not in (None, "pending") and job.get("status") != status):
+            continue
         jobs.append({key: job.get(key) for key in (
             "job_id", "status", "kind", "model", "project_id", "media_id", "media_ids",
-            "quoted_credits", "files", "observed_at")})
+            "quoted_credits", "files", "observed_at", "error")})
     jobs.sort(key=lambda job: job.get("observed_at") or "", reverse=True)
     return {"account_id": account_id, "jobs": jobs[:limit], "total": len(jobs),
             "has_more": len(jobs) > limit, "source": "local_saved_jobs"}
@@ -197,7 +234,9 @@ async def prepare_reference_uploads(job, paths, *, client=None):
         job.setdefault("reference_uploads", []).append({"path": str(path), **result})
         save_job(job)
         if result["status"] != "uploaded":
-            raise ValueError("Upload de referência inconclusivo; geração não enviada.")
+            reason = result.get("error") or result.get("message")
+            raise ValueError(f"Upload da referência {Path(path).name} inconclusivo; geração não enviada"
+                             + (f" ({reason})" if reason else "") + ". Confira o projeto antes de reenviar a imagem.")
         uploaded.append({"path": str(path), **result})
     return uploaded
 
@@ -243,7 +282,7 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
     from gflow_cli.api.client import validate_image_file
     from flow_http import FlowHTTP
     from gflow_cli.api.transports.batchexecute import _walk_lists
-    from flow_assets import media_uuid, parse_assets, payload_shape, video_record
+    from flow_assets import MediaAbsent, media_uuid, parse_assets, payload_shape, video_record
     from gflow_cli.api.transports.migrated_recover import _verify
     from flow_requests import video_request
 
@@ -254,17 +293,17 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         raise ValueError("Informe um orçamento inteiro não negativo.")
     if project_id is not None:
         validate_project(project_id)
-    model = model.strip().lower().replace("_", "-") if isinstance(model, str) else model
-    if model not in {"veo-lite", "veo-fast", "veo-quality", "omni-flash"}:
-        raise ValueError("Modelo inválido; use veo-lite, veo-fast, veo-quality ou omni-flash.")
-    if aspect not in {"16:9", "9:16"} or type(duration_seconds) is not int:
-        raise ValueError("Proporção ou duração inválida.")
+    model = normalize_model(model, VIDEO_MODELS)
+    if aspect not in {"16:9", "9:16"}:
+        raise ValueError(f"Proporção de vídeo inválida ({aspect!r}); use 16:9 ou 9:16.")
+    if type(duration_seconds) is not int:
+        raise ValueError("duration_seconds deve ser um inteiro (ex.: 4, 6, 8 ou 10).")
     if resolution not in {"360p", "720p", "1080p", "4k"}:
-        raise ValueError("Resolução de geração inválida.")
+        raise ValueError(f"Resolução inválida ({resolution!r}); use 360p, 720p, 1080p ou 4k.")
     if type(count) is not int or not 1 <= count <= 4:
         raise ValueError("Informe de 1 a 4 saídas.")
     if operation not in {"generate", "edit", "extend"}:
-        raise ValueError("Operação de vídeo inválida.")
+        raise ValueError("Operação de vídeo inválida: use generate, edit ou extend.")
     if type(create_new_workflow) is not bool or create_new_workflow and operation != "edit":
         raise ValueError("Novo histórico está disponível apenas na edição de vídeo.")
     if reference_asset_ids is not None:
@@ -346,9 +385,9 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
            "quoted_credits": None, "files": [], "media_ids": [], "workflow_ids": []}
     if quote_only:
         job["quote_only"] = True
-    save_job(job)
     if client is not None and client.account_id != account_id:
         raise ValueError("Sessão HTTP pertence a outra conta.")
+    save_job(job)
     owned = client is None
     client = client or FlowHTTP(account_id)
     try:
@@ -479,28 +518,43 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
                    media_id=next(iter(records)), workflow_id=next(iter(records.values())).workflow_id)
         save_job(job)
         client.status_from_submit(captured, job["media_id"])
-        async with asyncio.timeout(600):
-            while True:
-                for media_id, previous in list(records.items()):
-                    if previous.is_failed or (previous.is_done and previous.video_url):
-                        continue
-                    payload = await client.rpc("as29s", project_id=project_id,
-                        media_id=media_id, workflow_id=previous.workflow_id)
-                    try:
-                        record = video_record("as29s", payload, media_id)
-                        if record.workflow_id != previous.workflow_id or record.project_id != project_id:
-                            raise ValueError("Resposta de acompanhamento pertence a outra geração.")
-                    except ValueError:
-                        job["as29s_shape"] = payload_shape(payload)  # Sem IDs, textos ou URLs.
-                        raise
-                    records[media_id] = record
-                if all(r.is_failed or (r.is_done and r.video_url) for r in records.values()):
-                    break
-                await asyncio.sleep(5)
+        misses = {}
+        try:
+            async with asyncio.timeout(600):
+                while True:
+                    for media_id, previous in list(records.items()):
+                        if previous.is_failed or (previous.is_done and previous.video_url):
+                            continue
+                        payload = None
+                        try:
+                            payload = await client.rpc("as29s", project_id=project_id,
+                                media_id=media_id, workflow_id=previous.workflow_id)
+                            record = video_record("as29s", payload, media_id)
+                            if record.workflow_id != previous.workflow_id or record.project_id != project_id:
+                                raise ValueError("Resposta de acompanhamento pertence a outra geração.")
+                        except MediaAbsent:
+                            # O acompanhamento pode atrasar logo após o POST; ~30 s sem a mídia = provável perda.
+                            misses[media_id] = misses.get(media_id, 0) + 1
+                            if misses[media_id] < 6:
+                                continue
+                            job["as29s_shape"] = payload_shape(payload)
+                            raise ValueError("A mídia aceita não aparece no acompanhamento do Flow após ~30 s; a "
+                                             "geração pode ter se perdido no Flow. Use flow_wait_job/flow_recover_job "
+                                             "(não reenvie).") from None
+                        except ValueError:
+                            job["as29s_shape"] = payload_shape(payload)  # Sem IDs, textos ou URLs.
+                            raise
+                        misses.pop(media_id, None)
+                        records[media_id] = record
+                    if all(r.is_failed or (r.is_done and r.video_url) for r in records.values()):
+                        break
+                    await asyncio.sleep(5)
+        except TimeoutError:
+            raise ValueError("Vídeo ainda em processamento após 10 minutos; a geração continua no Flow. "
+                             "Use flow_wait_job com o job_id (sem reenviar).") from None
         job["status"] = "downloading"
         save_job(job)
-        output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-        output.mkdir(parents=True, exist_ok=True)
+        output = downloads_dir()
         for record in records.values():
             if not record.is_done:
                 continue
@@ -513,11 +567,11 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         job["status"] = "completed" if len(job["files"]) == count else "partial_result" if job["files"] else "generation_failed"
         await record_charge(client, job)
     except Exception as exc:
-        job["error_type"] = type(exc).__name__
+        job.update(error_fields(exc))
         job["failure_stage"] = job["status"]
         job["status"] = {"preparing": "failed_pre_submit", "submitting": "submission_unknown",
                          "accepted": "generation_unknown", "downloading": "download_failed"}.get(job["status"], job["status"])
-        # Não devolver mensagens/URLs do backend, nem reenviar uma geração incerta.
+        # error_fields omite mensagens/URLs do backend; geração incerta não é reenviada.
     finally:
         if owned:
             await client.close()
@@ -588,8 +642,7 @@ async def refine_video(account_id: str, project_id: str, media_id: str,
                     reference_asset_ids=reference_ids, resolution=resolution, client=client,
                     operation="edit", source_media_id=source_id)
             except Exception as exc:
-                turns.append({"turn":index + 1, "status":"failed_pre_submit",
-                              "error_type":type(exc).__name__})
+                turns.append({"turn":index + 1, "status":"failed_pre_submit", **error_fields(exc)})
                 status = "failed_pre_submit"
                 break
             child_status = child.get("status") or "partial_result"
@@ -598,7 +651,7 @@ async def refine_video(account_id: str, project_id: str, media_id: str,
                 quoted += child_quote
                 remaining = max(0, remaining - child_quote)
             turns.append({key:child.get(key) for key in
-                ("job_id", "status", "media_id", "quoted_credits", "files", "error_type",
+                ("job_id", "status", "media_id", "quoted_credits", "files", "error_type", "error",
                  "confirmation_id", "reference_upload_status")}
                 | {"turn":index + 1})
             if child_status != "completed":
@@ -634,7 +687,8 @@ async def refine_video(account_id: str, project_id: str, media_id: str,
             "workflow_id":workflow_id, "turns":turns,
             "job_ids":[item["job_id"] for item in turns if item.get("job_id")],
             "refinements_completed":len(outputs), "requested_refinements":len(refinements),
-            "quoted_credits":quoted, "remaining_budget":remaining}
+            "quoted_credits":quoted, "remaining_budget":remaining,
+            **({"error": turns[-1]["error"]} if status != "completed" and turns and turns[-1].get("error") else {})}
 
 
 async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
@@ -643,6 +697,11 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
     job = get_job(account_id, job_id)
     if job.get("status") == "cancelled":
         return job
+    if job.get("status") == "failed_pre_submit" or not (
+            job.get("request_media_ids") or job.get("media_ids") or job.get("media_id")):
+        # Nada chegou ao Flow (ou a tarefa não guarda IDs): não há o que reconciliar.
+        return {**job, "recovery_status": "nothing_to_recover",
+                "message": "Tarefa sem envio ou sem IDs de mídia registrados; nada a recuperar."}
     validate_project(job.get("project_id"))
     from flow_assets import media_uuid
 
@@ -674,7 +733,7 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
             raise ValueError("Sessão HTTP pertence a outra conta.")
         owned = client is None
         client = client or FlowHTTP(account_id)
-        downloads, pending, failed, direct_ids = [], [], [], set()
+        downloads, pending, failed, direct_ids, unseen = [], [], [], set(), []
         try:
             assets = []
             if expected:
@@ -700,9 +759,11 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
                         record = video_record("as29s", await client.rpc("as29s", project_id=job["project_id"],
                                                                           media_id=media_id, workflow_id=workflow_id), media_id)
                     except (ValueError, TypeError, IndexError):
+                        unseen.append(media_id)
                         continue
                     if (record.media_id != media_id or record.workflow_id != workflow_id
                             or record.project_id != job["project_id"]):
+                        unseen.append(media_id)
                         continue
                     confirmed[media_id] = workflow_id
                     if record.is_failed:
@@ -712,14 +773,15 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
 
                         body = await client.download(record.video_url, media_id)
                         _verify(body, expected=record.size_bytes, media_id=media_id)
-                        output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-                        output.mkdir(parents=True, exist_ok=True)
+                        output = downloads_dir()
                         path = output / f"{media_id}.mp4"
                         path.write_bytes(body)
                         downloads.append({"path":str(path),"bytes":len(body)})
                         direct_ids.add(media_id)
                     else:
                         pending.append(media_id)
+                else:
+                    unseen.append(media_id)  # Imagem fora da listagem do projeto.
             values = [media_id for media_id in expected if media_id in confirmed and media_id not in failed]
             if expected and pending:
                 job.update(media_ids=[media_id for media_id in expected if media_id in confirmed],
@@ -740,6 +802,17 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
             if expected and not values:
                 job["recovery_status"] = "not_listed"
                 job.pop("recovery_error_type", None)
+                job.pop("recovery_error", None)
+                save_job(job)
+                return job
+            if expected and set(values) <= set(unseen):
+                # O POST devolveu os IDs, mas o Flow não mostra a mídia nem no projeto nem no acompanhamento.
+                job.update(recovery_status="not_found", recovery_message=(
+                    "O envio foi aceito, mas a mídia não aparece no projeto nem no acompanhamento do Flow. "
+                    "Logo após o envio isso pode ser atraso; se persistir, a geração se perdeu no Flow: "
+                    "confira o saldo (flow_get_credits) antes de decidir, com o usuário, gerar de novo."))
+                job.pop("recovery_error_type", None)
+                job.pop("recovery_error", None)
                 save_job(job)
                 return job
             if not expected:
@@ -775,10 +848,15 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
             job.update(media_id=values[0], workflow_id=confirmed.get(values[0]))
         if failed:
             job["failed_media_ids"] = failed
+        if job["status"] == "completed" and "error" in job:
+            job["previous_error"] = job.pop("error")  # Falha original, já superada pela recuperação.
+            job.pop("error_location", None)
         job.pop("recovery_error_type", None)
+        job.pop("recovery_error", None)
     except Exception as exc:
         job["recovery_status"] = "unavailable"
-        job["recovery_error_type"] = type(exc).__name__
+        job.pop("recovery_error", None)
+        job.update(error_fields(exc, "recovery_"))
     save_job(job)
     return job
 
@@ -865,9 +943,7 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
         raise ValueError("Informe um orçamento inteiro não negativo.")
     if project_id is not None:
         validate_project(project_id)
-    model = model.strip().lower().replace("_", "-") if isinstance(model, str) else model
-    if model not in {"nano-banana-2", "nano-banana-2-lite", "nano-pro"}:
-        raise ValueError("Modelo inválido; use nano-banana-2, nano-banana-2-lite ou nano-pro.")
+    model = normalize_model(model, IMAGE_MODELS)
     if type(count) is not int:
         raise ValueError("Quantidade inválida.")
     if reference_asset_ids is not None and (type(reference_asset_ids) is not list
@@ -892,9 +968,9 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
            "model": model, "aspect": aspect, "count": count, "project_id": project_id,
            "quoted_credits": None, "media_ids": [], "files": [],
            "reference_asset_ids": reference_asset_ids or []}
-    save_job(job)
     if client is not None and client.account_id != account_id:
         raise ValueError("Sessão HTTP pertence a outra conta.")
+    save_job(job)
     owned = client is None
     client = client or FlowHTTP(account_id)
     try:
@@ -948,8 +1024,7 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
         job.update(status="downloading", media_ids=[image.media_id for image in images],
                    workflow_ids=[image.workflow_id for image in images])
         save_job(job)
-        output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-        output.mkdir(parents=True, exist_ok=True)
+        output = downloads_dir()
         for image in images:
             media_id = str(UUID(image.media_id))
             body = await client.download(original_image_url(image.image_url), media_id)
@@ -960,7 +1035,7 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
         job["status"] = "completed" if len(images) == count else "partial_result"
         await record_charge(client, job)
     except Exception as exc:
-        job["error_type"] = type(exc).__name__
+        job.update(error_fields(exc))
         job["failure_stage"] = job["status"]
         job["status"] = {"preparing": "failed_pre_submit", "submitting": "submission_unknown",
                          "downloading": "download_failed"}.get(job["status"], job["status"])
@@ -969,6 +1044,34 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
             await client.close()
         save_job(job)
     return job
+
+
+async def quote_images(account_id: str, model: str = "nano-banana-2", aspect: str = "16:9",
+                       count: int = 1, with_references: bool = False, project_id: str | None = None,
+                       *, client) -> dict:
+    """Cotação de imagens pelo catálogo HTrJv, com as validações do envio real e sem criar tarefa."""
+    from flow_capabilities import quote_configuration, read_capabilities
+    from flow_projects import parse_projects
+    from gflow_cli.api.image import Aspect
+
+    model = normalize_model(model, IMAGE_MODELS)
+    Aspect.from_cli(aspect)
+    if type(count) is not int or not 1 <= count <= 4:
+        raise ValueError("Informe de 1 a 4 imagens.")
+    if type(with_references) is not bool:
+        raise ValueError("with_references deve ser booleano.")
+    if project_id is None:
+        # O catálogo é lido no contexto de um projeto; cotar não cria projeto.
+        projects = parse_projects(await client.rpc("UpteDb"))["projects"]
+        if not projects:
+            raise ValueError("Cotação exige ao menos um projeto na conta.")
+        project_id = projects[0]["project_id"]
+    capabilities = await read_capabilities(account_id, validate_project(project_id), client=client)
+    quote = quote_configuration(capabilities, model, aspect=aspect, count=count, max_credits=10**6,
+                                features=[1, 4] if with_references else [1])
+    return {"account_id": account_id, "project_id": project_id, "status": "quoted", "model": model,
+            "aspect": aspect, "count": count, "with_references": with_references, "quote": quote,
+            "quoted_credits": quote["quoted_credits"], "credits_before": capabilities["credits"]}
 
 
 def original_image_url(url: str) -> str:

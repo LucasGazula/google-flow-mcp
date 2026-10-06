@@ -3,12 +3,13 @@
 import re
 import uuid
 
+from flow_errors import tolerant_rows
 from flow_projects import validate_project
 
 
 def validate_collection_id(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value):
-        raise ValueError("Coleção inválida.")
+        raise ValueError(f"collection_id inválido ({str(value)[:80]!r}); use um ID de flow_list_collections.")
     return value
 
 
@@ -20,22 +21,23 @@ def _collection(payload, collection_id: str, title: str) -> bool:
 
 def parse_collections(payload, project_id: str) -> list[dict]:
     """Coleções, inclusive vazias, da primeira resposta Zzl0ze do projeto."""
-    if not isinstance(payload, list) or len(payload) != 8 or not isinstance(payload[0], list):
+    # Projeto sem coleções pode vir com a lista nula desde 05/10/2026.
+    if not isinstance(payload, list) or len(payload) < 8 or not isinstance(payload[0], (list, type(None))):
         raise ValueError("Resposta de coleções não reconhecida.")
-    result, seen = [], set()
-    for row in payload[0]:
+
+    def parse(row):
         if (not isinstance(row, list) or len(row) < 4 or row[3] != project_id
                 or not isinstance(row[2], list) or not row[2]
                 or not isinstance(row[2][0], str) or not row[2][0].strip()):
             raise ValueError("Registro de coleção não reconhecido.")
-        collection_id = validate_collection_id(row[0])
-        parent = validate_collection_id(row[1]) if row[1] is not None else None
-        if collection_id in seen:
-            raise ValueError("Coleção duplicada na resposta do projeto.")
-        seen.add(collection_id)
-        result.append({"collection_id": collection_id, "parent_collection_id": parent,
-                       "title": row[2][0], "project_id": project_id})
-    return result
+        return {"collection_id": validate_collection_id(row[0]),
+                "parent_collection_id": validate_collection_id(row[1]) if row[1] is not None else None,
+                "title": row[2][0], "project_id": project_id}
+
+    unique = {}
+    for item in tolerant_rows(payload[0], parse):
+        unique.setdefault(item["collection_id"], item)
+    return list(unique.values())
 
 
 async def _read_collection(client, project_id: str, collection_id: str, title: str) -> bool:
@@ -141,8 +143,10 @@ async def move_assets(account_id: str, project_id: str, asset_ids: list[str],
     try:
         assets = parse_assets(await client.rpc("Zzl0ze", project_id=project_id), project_id)
         by_id = {asset["media_id"]: asset for asset in assets}
-        if any(asset_id not in by_id for asset_id in asset_ids):
-            raise ValueError("Todos os ativos precisam pertencer ao projeto informado.")
+        missing = [asset_id for asset_id in asset_ids if asset_id not in by_id]
+        if missing:
+            raise ValueError(f"Ativos ausentes deste projeto: {', '.join(missing[:5])}"
+                             + (" …" if len(missing) > 5 else "") + "; nada foi movido.")
         workflows = [by_id[asset_id].get("workflow_id") for asset_id in asset_ids]
         if any(not isinstance(workflow, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", workflow)
                for workflow in workflows):
@@ -162,7 +166,7 @@ async def move_assets(account_id: str, project_id: str, asset_ids: list[str],
             current = {asset["media_id"]: asset for asset in parse_assets(observed, project_id)}
             # Exigir o workflow explícito: metadados ausentes não provam movimento à raiz.
             associations = {}
-            for row in observed[1]:
+            for row in observed[1] or []:
                 if (isinstance(row, list) and len(row) >= 5
                         and isinstance(row[0], str) and row[4] == project_id):
                     if row[0] in associations:

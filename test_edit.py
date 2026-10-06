@@ -131,6 +131,31 @@ class NativeEditTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 get_settings.cache_clear()
 
+    async def test_batch_failure_after_progress_is_partial_not_unsent(self):
+        from flow_edit import edit_images
+        from gflow_cli.config import get_settings
+
+        project, *media_ids = (str(uuid4()) for _ in range(3))
+        results = [
+            {"job_id":str(uuid4()),"status":"completed","media_ids":[str(uuid4())],"files":["one.jpg"],
+             "quoted_credits":0},
+            {"job_id":str(uuid4()),"status":"failed_pre_submit","error":"Imagem ausente da resposta do projeto."},
+        ]
+        client = SimpleNamespace(account_id="conta-a",rpc=AsyncMock(return_value=[None,[]]),close=AsyncMock())
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ,{"GFLOW_CLI_HOME":home}), \
+             patch("flow_edit.image_versions",side_effect=lambda _p,mid,_project:[SimpleNamespace(workflow_id=mid)]), \
+             patch("flow_capabilities.read_capabilities",AsyncMock(return_value={})), \
+             patch("flow_capabilities.quote_configuration",return_value={
+                 "model_key":"NARWHAL","credits_per_output":0,"quoted_credits":0}), \
+             patch("flow_edit.edit_image",AsyncMock(side_effect=results)):
+            get_settings.cache_clear()
+            try:
+                batch = await edit_images("conta-a",project,media_ids,"Mono",0,client=client)
+            finally:
+                get_settings.cache_clear()
+        self.assertEqual(batch["status"],"partial_result")  # a primeira imagem já foi enviada
+        self.assertEqual(batch["error"],"Imagem ausente da resposta do projeto.")
+
     async def test_crop_and_uploaded_image_download_preserve_workflow_and_reject_bad_region(self):
         from flow_assets import image_download_url
         from flow_edit import crop_image

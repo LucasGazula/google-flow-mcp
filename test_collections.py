@@ -73,9 +73,10 @@ class CollectionOperationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_collections(payload(reply.collection_id), project_id), [{
             "collection_id": reply.collection_id, "parent_collection_id": None,
             "title": "Untitled collection", "project_id": project_id}])
-        with self.assertRaises(ValueError):
-            parse_collections([[payload(reply.collection_id)[0][0]] * 2,
-                               [], [], [], None, None, None, []], project_id)
+        duplicated = parse_collections([[payload(reply.collection_id)[0][0]] * 2,
+                                        [], [], [], None, None, None, []], project_id)
+        self.assertEqual(len(duplicated), 1)
+        self.assertEqual(parse_collections([None, None, None, None, None, None, None, None], project_id), [])
 
     async def test_validation_prevents_unsafe_mutations(self):
         client = SimpleNamespace(account_id="conta-a", rpc=AsyncMock(), close=AsyncMock())

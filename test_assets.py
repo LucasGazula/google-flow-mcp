@@ -169,8 +169,9 @@ class AssetTest(unittest.TestCase):
         self.assertIsNone(details["versions"][0]["dimensions"])
         for malformed in ([], [None], [[None] * 17]):
             row[6] = malformed
-            with self.assertRaises(ValueError):
-                parse_assets(payload, project)
+            skipped = []
+            self.assertEqual(parse_assets(payload, project, skipped), [])  # linha ignorada, não derruba a lista
+            self.assertEqual(skipped[0]["media_id"], image)
 
     def test_image_ids_are_not_swapped_with_video_workflow_ids(self):
         project, image, workflow = (str(uuid4()) for _ in range(3))
@@ -197,14 +198,16 @@ class AssetTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 media_revision(marker)
         row[3] = "unknown"
-        with self.assertRaises(ValueError):
-            parse_assets(payload, project)
+        skipped = []
+        self.assertEqual(parse_assets(payload, project, skipped), [])
+        self.assertEqual(skipped, [{"media_id": image, "reason": "Versão de mídia inválida."}])
+        payload[2] = [row, ["outra", "linha"]]
         row[3] = "CAE"
+        self.assertEqual([a["media_id"] for a in parse_assets(payload, project)], [image])
         for invalid in (None, [], [None, [], []]):
             with self.assertRaises(ValueError):
                 parse_assets(invalid, project)
-        with self.assertRaises(ValueError):
-            parse_assets(payload, str(uuid4()))
+        self.assertEqual(parse_assets(payload, str(uuid4())), [])  # linhas de outro projeto são ignoradas
 
     def test_parse_assets_marks_archived_based_on_workflow_metadata(self):
         project, image1, wf1, image2, wf2 = (str(uuid4()) for _ in range(5))

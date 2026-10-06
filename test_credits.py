@@ -9,6 +9,7 @@ class CreditsTest(unittest.TestCase):
     def test_http_balance_rejects_unknown_and_keeps_zero(self):
         for balance in (0, 946, 1050):
             self.assertEqual(parse_http_credits([balance,1,2,2,None,balance,None]),balance)
+        self.assertEqual(parse_http_credits([946,1,2,2,None,946,None,"campo novo"]), 946)
         for payload in (None, {}, [], [946], [-1,1,2,2,None,0,None],
                         [True,1,2,2,None,0,None], ["946",1,2,2,None,0,None]):
             with self.assertRaises(ValueError):

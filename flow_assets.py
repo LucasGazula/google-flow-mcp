@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import os
 from pathlib import Path
 from uuid import UUID
 
@@ -19,11 +18,17 @@ def _base_media_id(value: str) -> str:
 
 
 def media_uuid(value: str) -> str:
+    message = (f"ID inválido ({str(value)[:80]!r}); esperado um UUID do Flow "
+               "(media_id de flow_list_assets, entity_id de flow_list_characters etc.).")
     if not isinstance(value, str):
-        raise ValueError("Mídia inválida.")
+        raise ValueError(message)
     media_id = _base_media_id(value)
-    if str(UUID(media_id)) != media_id:
-        raise ValueError("Mídia inválida.")
+    try:
+        valid = str(UUID(media_id)) == media_id
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(message)
     return value
 
 
@@ -50,6 +55,10 @@ def media_revision(value: str | None) -> int:
     return revision
 
 
+class MediaAbsent(ValueError):
+    """A resposta não traz a mídia pedida (atraso do Flow ou geração perdida)."""
+
+
 def video_record(rpc, payload, media_id=None):
     """O decoder fixado aceita só CAE; edições/extensões têm novas revisões.
 
@@ -63,7 +72,7 @@ def video_record(rpc, payload, media_id=None):
     if media_id is not None:
         rows = [r for r in rows if _base_media_id(r[0]) == _base_media_id(media_id)]
         if not rows:
-            raise ValueError("Mídia esperada ausente da resposta.")
+            raise MediaAbsent("Mídia esperada ausente da resposta.")
     if not rows:
         return generation_record(rpc, payload)
     if len(rows) != 1:
@@ -127,8 +136,14 @@ def image_download_url(payload, project_id, media_id):
 
 
 
-def parse_assets(payload, project_id: str) -> list[dict]:
-    if not isinstance(payload, list) or len(payload) != 8:
+def parse_assets(payload, project_id: str, skipped: list | None = None) -> list[dict]:
+    """Mídias do projeto na resposta Zzl0ze.
+
+    Uma linha em formato desconhecido é ignorada (e descrita em `skipped`, se
+    informado) em vez de derrubar a listagem inteira: mudanças do Flow numa mídia
+    não devem impedir o uso das demais. O envelope inválido continua sendo erro.
+    """
+    if not isinstance(payload, list) or len(payload) < 8:  # Seções novas no fim não invalidam.
         raise ValueError("Resposta de mídia não reconhecida.")
     # Projeto vazio: o Flow omite as listas (null) desde 05/10/2026.
     payload = [*payload[:1], payload[1] or [], payload[2] or [], *payload[3:]]
@@ -153,38 +168,53 @@ def parse_assets(payload, project_id: str) -> list[dict]:
                        for ref in row[3][2][0] if isinstance(ref, list) and ref}
     assets = []
     for row in payload[2]:
-        if not isinstance(row, list) or len(row) < 7 or row[1] != project_id:
-            raise ValueError("Registro de mídia não reconhecido.")
-        if row[3] is None and (row[0] in character_refs or (payload[5] and isinstance(row[6], list))):
-            continue  # cópias internas de personagem (retrato/corpo): imagem sem versão
-        revision = media_revision(row[3])
-        info = row[6]
-        dimensionless_upscale = (
-            isinstance(info, list) and len(info) == 1
-            and isinstance(info[0], list) and len(info[0]) == 17
-            and type(info[0][14]) is int and info[0][14] == 1
-            and info[0][16] == [None, 1]
-            and isinstance(info[0][13], str) and info[0][13].startswith("https://")
-        )
-        if isinstance(info, list) and (len(info) >= 3 or dimensionless_upscale):
-            dims = None if dimensionless_upscale else info[2]
-            if not dimensionless_upscale and (not isinstance(dims, list) or len(dims) != 2 or any(type(v) is not int or v <= 0 for v in dims)):
-                raise ValueError("Dimensões de imagem não reconhecidas.")
-            media_id, workflow_id = media_uuid(row[0]), media_uuid(row[2])
-            asset = {"media_id": media_id, "workflow_id": workflow_id,
-                     "kind": "image", "dimensions": dims}
-        elif row[6] is None and len(row) >= 8 and isinstance(row[7], list):
-            record = video_record("Zzl0ze", row)
-            media_id, workflow_id = media_uuid(record.media_id), media_uuid(record.workflow_id)
-            asset = {"media_id": media_id, "workflow_id": workflow_id,
-                     "kind": "video", "status": record.status, "bytes": record.size_bytes}
-        else:
-            raise ValueError("Tipo de mídia não reconhecido.")
-        asset.update(project_id=project_id, revision=revision,
+        try:
+            asset = _parse_asset_row(row, project_id, payload, character_refs)
+        except (ValueError, TypeError, IndexError) as exc:
+            if skipped is not None:
+                skipped.append({"media_id": row[0] if isinstance(row, list) and row and isinstance(row[0], str) else None,
+                                "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+            continue
+        if asset is None:
+            continue
+        workflow_id, media_id = asset["workflow_id"], asset["media_id"]
+        asset.update(project_id=project_id,
                      name=names.get(workflow_id, names.get(media_id)),
                      collection_id=collections.get(workflow_id), archived=workflow_id in archived)
         assets.append(asset)
     return assets
+
+
+def _parse_asset_row(row, project_id, payload, character_refs):
+    if not isinstance(row, list) or len(row) < 7 or row[1] != project_id:
+        raise ValueError("Registro de mídia não reconhecido.")
+    if row[3] is None and (row[0] in character_refs or (payload[5] and isinstance(row[6], list))):
+        return None  # cópias internas de personagem (retrato/corpo): imagem sem versão
+    revision = media_revision(row[3])
+    info = row[6]
+    dimensionless_upscale = (
+        isinstance(info, list) and len(info) == 1
+        and isinstance(info[0], list) and len(info[0]) == 17
+        and type(info[0][14]) is int and info[0][14] == 1
+        and info[0][16] == [None, 1]
+        and isinstance(info[0][13], str) and info[0][13].startswith("https://")
+    )
+    if isinstance(info, list) and (len(info) >= 3 or dimensionless_upscale):
+        dims = None if dimensionless_upscale else info[2]
+        if not dimensionless_upscale and (not isinstance(dims, list) or len(dims) != 2 or any(type(v) is not int or v <= 0 for v in dims)):
+            raise ValueError("Dimensões de imagem não reconhecidas.")
+        media_id, workflow_id = media_uuid(row[0]), media_uuid(row[2])
+        asset = {"media_id": media_id, "workflow_id": workflow_id,
+                 "kind": "image", "dimensions": dims}
+    elif row[6] is None and len(row) >= 8 and isinstance(row[7], list):
+        record = video_record("Zzl0ze", row)
+        media_id, workflow_id = media_uuid(record.media_id), media_uuid(record.workflow_id)
+        asset = {"media_id": media_id, "workflow_id": workflow_id,
+                 "kind": "video", "status": record.status, "bytes": record.size_bytes}
+    else:
+        raise ValueError("Tipo de mídia não reconhecido.")
+    asset["revision"] = revision
+    return asset
 
 
 async def project_media(page, project_id: str):
@@ -269,8 +299,10 @@ async def search_assets(account_id: str, query: str, kind: str | None = None,
                     await client.rpc("Zzl0ze", project_id=project["project_id"]),
                     project["project_id"],
                 )
-            except Exception:
-                failures.append(project["project_id"])
+            except Exception as exc:
+                from flow_errors import error_fields
+
+                failures.append({"project_id": project["project_id"], **error_fields(exc)})
                 continue
             assets_scanned += len(assets)
             for asset in assets:
@@ -327,11 +359,14 @@ async def delete_asset(account_id: str, project_id: str, media_id: str,
             return {"account_id": account_id, "project_id": project_id,
                     "media_id": media_id, "status": "not_found_in_project_listing"}
         workflow_id = media_uuid(asset["workflow_id"])
+        submit_error = {}
         try:  # Pedido capturado em "Mover para a lixeira" na interface; nunca reenviar.
             await client.rpc("pGCYOe", params=[[[workflow_id, None, None, [None, None, 1], project_id]],
                                                [["metadata.archived"]]])
-        except Exception:
-            pass
+        except Exception as exc:
+            from flow_errors import error_fields
+
+            submit_error = error_fields(exc, "submit_")
         import asyncio
 
         for attempt in range(6):
@@ -342,7 +377,7 @@ async def delete_asset(account_id: str, project_id: str, media_id: str,
                 break
         else:
             return {"account_id": account_id, "project_id": project_id, "media_id": media_id,
-                    "workflow_id": workflow_id, "status": "submission_unknown",
+                    "workflow_id": workflow_id, "status": "submission_unknown", **submit_error,
                     "message": "Arquivamento não confirmado por leitura; confira o projeto antes de repetir."}
         return {"account_id": account_id, "project_id": project_id, "media_id": media_id,
                 "workflow_id": workflow_id, "kind": asset["kind"], "status": "archived"}
@@ -387,9 +422,11 @@ async def upload_image(account_id: str, project_id: str, path: str, *, client=No
             media_revision(rows[0][3])
             if media_id != packet["request_media_ids"][0] or workflow_id != packet["request_workflow_ids"][0]:
                 raise ValueError("Upload pertence a outro pedido.")
-        except Exception:
+        except Exception as exc:
+            from flow_errors import error_fields
+
             return {"account_id": account_id, "project_id": project_id, "name": name,
-                    "status": "submission_unknown", "source": "HTTP/maseQ",
+                    "status": "submission_unknown", "source": "HTTP/maseQ", **error_fields(exc),
                     "request_media_ids": packet["request_media_ids"],
                     "request_workflow_ids": packet["request_workflow_ids"],
                     "message": "Upload inconclusivo; confira o projeto antes de tentar novamente."}
@@ -459,12 +496,15 @@ async def upload_asset(account_id: str, project_id: str, path: str, *, client=No
                     if result is not None:
                         return {"account_id": account_id, "project_id": project_id, **result}
                     await asyncio.sleep(3)
-            except Exception:
-                pass  # Após escolher o arquivo, qualquer falha de observação é incerta.
+                observed = {}
+            except Exception as exc:
+                from flow_errors import error_fields
+
+                observed = error_fields(exc)  # Após escolher o arquivo, qualquer falha de observação é incerta.
         finally:
             if not keep_page:
                 await page_context.__aexit__(None, None, None)
-        return {"account_id": account_id, "project_id": project_id, "kind": "video",
+        return {"account_id": account_id, "project_id": project_id, "kind": "video", **observed,
                 "status": "submission_unknown", "message": "Upload inconclusivo; confira o projeto antes de tentar novamente."}
     finally:
         if browser is not client.browser:

@@ -5,8 +5,9 @@ from urllib.parse import urlsplit
 
 
 def parse_http_credits(payload) -> int:
-    # nzlxg observado no menu: o primeiro campo contém o saldo exibido.
-    if not isinstance(payload, list) or len(payload) != 7 or type(payload[0]) is not int or payload[0] < 0:
+    # nzlxg observado no menu: o primeiro campo contém o saldo exibido e o quarto, o plano.
+    # Campos novos no fim da mensagem (7 hoje) não invalidam a leitura.
+    if not isinstance(payload, list) or len(payload) < 4 or type(payload[0]) is not int or payload[0] < 0:
         raise ValueError("Resposta de saldo não reconhecida.")
     return payload[0]
 

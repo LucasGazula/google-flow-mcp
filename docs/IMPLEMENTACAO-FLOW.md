@@ -1459,3 +1459,22 @@ pendentes; "Criar retrato/corpo" geram mídia e não foram usados.
   atrelada ao dispositivo). O timer de keepalive só ajuda enquanto a sessão estiver
   viva; para durar, a Banana Pi precisa de login próprio (assistido) com linhagem de
   cookies independente da do Windows. Cron não instalado.
+- Estabilidade e erros para agentes (06/10/2026): `flow_errors.py` repassa ao agente só
+  mensagens escritas pelo MCP (rede/navegador/Flow viram dica; Playwright só a 1ª linha
+  sem URLs) e acrescenta `next_step` por status. Leituras de projeto, ativos, coleções,
+  personagens, ferramentas, sessões do Agent, cenas e catálogo HTrJv ignoram linhas ou
+  variantes em formato novo; `Zzl0ze` com seções extras e `nzlxg` com campos extras
+  continuam legíveis; mutações e composição de cena seguem estritas. Corrigidos: pipe
+  do worker limitado a 64 KiB por linha (respostas grandes derrubavam o worker),
+  worker morto por pedido ilegível, resposta do Agent perdida se a leitura de saldo
+  falhasse, lote de edição marcado `failed_pre_submit` depois de imagens já enviadas,
+  e o deploy apagando `app/downloads` na Pi a cada push. Conta deslogada (redireciona
+  para `flow.google.com/about`) agora gera "refaça o login" — confirmado na Pi com
+  ddv9. Novo `flow_quote_images` (Pi: nano-banana-2/pro/lite = 0 crédito). `test_gflow_contract.py` falha se o gflow-cli perder algo que o MCP usa por dentro. Validação
+  somente leitura na Pi (ddv1), sem créditos. `flow_recover_job` agora marca
+  `recovery_status=not_found` quando o POST foi aceito mas a mídia não aparece na
+  listagem nem no `as29s`; as tarefas Omni c7a120a2 e c15715a2 (06/10 ~03:03 UTC) se
+  enquadram: geração perdida no Flow, causa externa. `flow_account_status` na Pi
+  confirma pela listagem HTTP quando o navegador diz `google_session_only` (ddv1:
+  `authenticated`); saldo sem clique no menu; deslogada detectada em ~12 s.
+  Suítes WSL/Windows: 235 testes.

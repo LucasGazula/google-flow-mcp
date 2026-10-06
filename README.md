@@ -5,7 +5,7 @@ usando as contas e os créditos do usuário. Vídeos são o foco principal.
 
 ## Estado atual
 
-O servidor MCP por `stdio` oferece 63 ferramentas implementadas:
+O servidor MCP (`stdio` ou HTTP na LAN com `--http`) oferece 65 ferramentas implementadas:
 
 - Contas e sessão: `flow_status`, `flow_list_accounts`, `flow_connect_account`, `flow_account_status`, `flow_begin_account_connection`, `flow_complete_account_connection`, `flow_get_credits`.
 - Projetos: `flow_list_projects`, `flow_create_project`, `flow_rename_project`, `flow_delete_project` (confirmação explícita), `flow_download_project`, `flow_project_summary`, `flow_get_capabilities`.
@@ -13,6 +13,7 @@ O servidor MCP por `stdio` oferece 63 ferramentas implementadas:
 - Coleções: `flow_list_collections`, `flow_create_collection`, `flow_rename_collection`, `flow_move_assets`, `flow_download_collection`. `flow_list_assets` filtra por associação direta; `flow_download_collection(recursive=true)` inclui subcoleções conhecidas.
 - Ativos e Mídia: `flow_list_assets` (filtros por coleção, `kind`, tamanho, ordenação e limite), `flow_search_assets` (busca por nome/ID entre projetos), `flow_get_asset`, `flow_upload_image`, `flow_upload_asset`, `flow_confirm_upload`, `flow_download_asset`, `flow_delete_asset` (arquiva o workflow após confirmação explícita). Upload de vídeo usa a interface do Flow; se aparecer o aviso de direitos, a ferramenta solicita autorização explícita antes de confirmá-lo.
 - Geração e Edição de Imagem: `flow_generate_images`, `flow_edit_image` (seleção, desenho e referências locais ou por ID do projeto), `flow_crop_image`, `flow_upscale_image` (upscale nativo de imagem).
+- Cotação sem gasto: `flow_quote_video` (geração/edição/extensão) e `flow_quote_images`.
 - Geração e Edição de Vídeo: `flow_generate_video`, `flow_edit_video`, `flow_refine_video`, `flow_extend_video`, `flow_upscale_video`.
 - Multimídia, Cenas, Personagens, Agent, Tools e Upscale: `flow_save_frame`, `flow_export_gif`, `flow_build_scene`, `flow_manage_scene`, `flow_list_scenes`, `flow_export_scene`, `flow_list_characters`, `flow_list_voice_presets`, `flow_manage_character`, `flow_get_agent_brief`, `flow_update_agent_brief`, `flow_list_agent_sessions`, `flow_create_agent_session`, `flow_rename_agent_session`, `flow_delete_agent_session`, `flow_agent_request`, `flow_list_tools`, `flow_upscale`.
 - Tarefas e Recuperação: `flow_list_jobs`, `flow_get_job`, `flow_recover_job`, `flow_wait_job`, `flow_cancel_job`, `flow_clean_jobs`.
@@ -118,7 +119,10 @@ Instale Chrome no mesmo sistema operacional do processo MCP. No cliente, chame
 (até dez minutos). Repita com `conta-b`. Cada apelido identifica um perfil separado;
 confira a conta Google escolhida na janela. O MCP não acessa seu perfil pessoal.
 
-`flow_list_accounts()` lista os perfis salvos, sem validar a sessão.
+`flow_list_accounts()` lista os perfis salvos, sem validar a sessão. Na Pi, cada
+conta traz `keepalive` (última checagem automática de saldo, a cada 30 min):
+`last_credits` é o saldo visto em `last_ok` e `needs_login=true` após duas falhas
+seguidas indica que a conta precisa de novo login. O caminho do estado pode ser trocado com `FLOW_MCP_KEEPALIVE_STATE`.
 `flow_get_credits(account_id="conta-a")` consulta o saldo remoto sem geração.
 `status="ok", credits=0` é saldo zero; `status="unavailable", credits=null`
 é uma leitura inconclusiva. Não estima o custo de geração.
@@ -136,7 +140,8 @@ indica que a consulta não foi conclusiva, sem assumir que a sessão expirou.
 Perfis ficam em `profiles/` ao lado do servidor. Defina `FLOW_MCP_HOME` com um
 caminho absoluto privado para usar outro local; mantenha-o fora do Git. Essa
 variável precisa ser repassada ao processo pelo cliente MCP. Logs do backend e
-mensagens de exceção não são encaminhados nas respostas MCP.
+mensagens de exceção de rede/navegador não são encaminhados nas respostas MCP
+(veja "Erros e próximos passos").
 
 No Windows, execute MCP e Chrome no Windows; Chrome Windows não é detectado
 como Chrome Linux pelo processo no WSL. Ao compartilhar esta pasta entre Windows
@@ -149,6 +154,52 @@ portabilidade das sessões continuam sem validação.
 As operações de diagnóstico e conexão não geram mídia nem alteram a preferência
 de aprovação de gastos. `flow_generate_video` consome créditos autorizados.
 Não versionar cookies, tokens ou perfis de navegador.
+
+## Erros e próximos passos
+
+Toda resposta traz `status`. Em falha, `error_type` diz a classe do erro e
+`error` explica o motivo quando a mensagem foi escrita pelo próprio MCP (ex.:
+"Modelo inválido ('sora'); use veo-lite, ..."; "Custo de 15 créditos acima do orçamento
+autorizado (max_credits=10)"; "Configuração ... indisponível. Opções de omni-flash:
+..."). Exceções de rede, navegador ou do Flow podem conter cookies ou URLs
+assinadas; delas sai apenas uma dica genérica (`flow_errors.py`).
+`next_step` diz o que fazer em cada estado; o principal: `submission_unknown`,
+`accepted`, `generation_unknown` e `partial_result` **nunca** devem ser reenviados;
+use `flow_wait_job`/`flow_recover_job` com o `job_id`. `failed_pre_submit`
+significa que nada foi enviado nem cobrado. Se o Flow aceitou o envio mas a mídia
+não aparece no projeto nem no acompanhamento, a recuperação informa
+`recovery_status=not_found` e `flow_wait_job` para com `wait_status=not_found` após
+três consultas: a geração se perdeu no Flow; confira o saldo antes de decidir, com o
+usuário, gerar de novo.
+
+Cada conta executa uma operação por vez. Se outra chamada da mesma conta chegar
+durante uma operação longa (ex.: geração de até 20 min), ela espera até 30 s e
+então responde `account_busy` com `running_action`, sem enviar nada;
+`flow_wait_job` continua esperando nesse caso.
+
+Para diagnóstico, cada operação gera uma linha em `logs/operations.jsonl` (na
+Pi, ao lado de `home/`; em outro lugar, defina `FLOW_MCP_LOG`) com horário,
+conta, ação, status, `error`/`error_location`, `job_id` e duração — sem prompts,
+payloads, cookies ou URLs. O arquivo gira ao passar de 5 MB.
+
+`flow_status` informa a máquina, a versão do código, as pastas `downloads_dir`
+e `jobs_dir`, espaço livre (`disk_free_mb`) e se Chrome/ffmpeg existem (sem ffmpeg,
+lista em `unavailable_tools` as ferramentas locais de vídeo): caminhos de arquivo (uploads e downloads) são sempre da máquina
+onde o MCP roda (a Banana Pi, no uso por HTTP), e as tarefas de cada instância
+(Windows/Pi) ficam separadas.
+
+Leituras toleram mudanças pontuais do Flow: uma mídia, projeto, coleção,
+personagem, ferramenta ou variante do catálogo em formato desconhecido é ignorada
+(em `flow_list_assets`, listada em `unrecognized_media`) em vez de derrubar a
+consulta inteira. Mutações continuam estritas. Se uma leitura HTTP falhar por
+cookies rotacionados, o worker recopia a sessão do Chrome e repete a leitura uma
+vez; mutações nunca são repetidas. Página redirecionada para o login gera erro
+pedindo novo login da conta.
+
+Cada conta usa um worker com Chrome headless residente. Após 15 minutos sem
+pedidos (`FLOW_MCP_WORKER_IDLE_SECONDS`), o Chrome é fechado, liberando memória e
+o perfil para o keepalive; o próximo pedido o reabre em alguns segundos. Uma
+confirmação de upload pendente mantém o Chrome aberto.
 
 ## Gerar um vídeo com orçamento
 

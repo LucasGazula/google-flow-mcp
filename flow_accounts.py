@@ -94,6 +94,21 @@ async def account_operation(action: str, account_id: str = "", session: dict | N
             if profile_store.read_account_file(pdir) is None:
                 # Identifica o perfil pelo e-mail; não substitui um registro existente.
                 (pdir / profile_store.ACCOUNT_FILE).write_text(session.user_email, encoding="utf-8")
+        if action in {"status", "connect", "import"} and not session.authenticated:
+            # No Linux a verificação pelo navegador devolve google_session_only mesmo com sessão
+            # válida (Pi, 05–06/10/2026); ler os projetos por HTTP (sem cliques) é a prova confiável.
+            from flow_errors import error_fields
+            from flow_http import FlowHTTP, http_operation
+
+            client = FlowHTTP(account_id, resident=True)
+            try:
+                await http_operation(client, "projects", {})
+                result.update(status="authenticated", authenticated=True, verified_by="HTTP/UpteDb",
+                              browser_check=session.outcome.value)
+            except Exception as exc:
+                result["http_check_error"] = error_fields(exc).get("error")
+            finally:
+                await client.close()
     return result
 
 
@@ -164,7 +179,10 @@ if __name__ == "__main__":
         except asyncio.TimeoutError:
             payload = {"status": "timeout", "generation_enabled": False,
                        "message": "Tempo esgotado; consulte a conta antes de tentar novamente."}
-        except Exception:
+        except Exception as exc:
+            from flow_errors import error_fields
+
             payload = {"status": "backend_error", "generation_enabled": False,
-                       "message": "Falha no backend. Verifique Chrome, tela gráfica e sessão local."}
+                       "message": "Falha no backend. Verifique Chrome, tela gráfica e sessão local.",
+                       **error_fields(exc)}
     print(json.dumps(payload))

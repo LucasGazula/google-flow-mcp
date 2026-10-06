@@ -38,12 +38,16 @@ def parse_model_statuses(payload):
         raise ValueError("Estado dos modelos não reconhecido.")
     states = {}
     for row in rows:
-        key, status = _key(_field(row, 0)), _field(row, 1, 0)
-        if type(status) is not int or status not in {0, 1, 2, 3} or key in states:
-            raise ValueError("Estado de modelo não reconhecido.")
-        reasons = _field(row, 2, [])
-        if not isinstance(reasons, list):
-            raise ValueError("Restrição de modelo não reconhecida.")
+        try:
+            key = _key(_field(row, 0))
+        except ValueError:
+            continue
+        status, reasons = _field(row, 1, 0), _field(row, 2, [])
+        if (type(status) is not int or status not in {0, 1, 2, 3} or key in states
+                or not isinstance(reasons, list) or any(not isinstance(r, list) for r in reasons)):
+            # Estado novo/ambíguo: na dúvida o modelo fica bloqueado, nunca liberado.
+            states[key] = {"status": status, "blocked": True}
+            continue
         # Mesma condição da lista de modelos do frontend (QWa/RZa).
         restricted = (status in {2, 3} or any(_field(r, 0) == 1 for r in reasons)) and any(
             _field(r, 1) in {1, 2} for r in reasons)
@@ -63,54 +67,73 @@ def parse_capabilities(payload, tier, statuses):
             raise ValueError("Catálogo de modelos não reconhecido.")
         models = []
         for group in groups:
-            label, identifier, usages = _field(group, 0), _key(_field(group, 3)), _field(group, 1)
-            if not isinstance(label, str) or not label or len(label) > 200 or not isinstance(usages, list):
-                raise ValueError("Modelo do catálogo não reconhecido.")
-            variants = []
-            for row in usages:
-                key = _key(_field(row, 0))
-                entries = _field(row, 4, [])
-                if not isinstance(entries, list):
-                    raise ValueError("Preços do catálogo não reconhecidos.")
-                price = _price(entries, tier)
-                state = statuses.get(key, statuses.get(identifier))
-                blocked = state is not None and state["blocked"]
-                aspect_codes = _field(_field(row, 12 if mode == "video" else 13, []), 0, [])
-                aspect_map = {1:"9:16", 2:"16:9"} if mode == "video" else {
-                    1:"1:1", 2:"9:16", 3:"16:9", 4:"3:4", 5:"4:3"}
-                if not isinstance(aspect_codes, list) or any(type(c) is not int for c in aspect_codes):
-                    raise ValueError("Proporções do catálogo não reconhecidas.")
-                # Desde 05/10/2026 o Flow repete códigos e inclui 0 (não especificado); código desconhecido não é oferecido.
-                known = [c for c in aspect_codes if c in aspect_map]
-                if aspect_codes and not known:
-                    raise ValueError("Proporções do catálogo não reconhecidas.")
-                aspect_codes = known
-                variant = {"model_key":key, "credits_per_output":price,
-                    "available":price is not None and not blocked,
-                    "availability_reason":"remote_restriction" if blocked else "tier_unavailable" if price is None else None,
-                    "aspects":list(dict.fromkeys(aspect_map[c] for c in (aspect_codes or list(aspect_map))))}
-                if mode == "video":
-                    duration = _field(row, 16, 8)
-                    resolutions = _field(_field(row, 23, []), 0, []) or [1]
-                    resolution_map = {1:"720p", 2:"1080p", 3:"4k", 4:"360p"}
-                    if (type(duration) is not int or duration <= 0 or not isinstance(resolutions, list)
-                            or any(type(c) is not int or c not in resolution_map for c in resolutions)):
-                        raise ValueError("Formato de vídeo do catálogo não reconhecido.")
-                    variant.update(duration_seconds=duration,
-                                   duration_adjustable=_field(row, 22, False) is True,
-                                   resolutions=list(dict.fromkeys(resolution_map[c] for c in resolutions)))
-                feature_groups = _field(_field(row, 7 if mode == "video" else 8, []), 0, [])
-                if not isinstance(feature_groups, list):
-                    raise ValueError("Entradas do catálogo não reconhecidas.")
-                combinations = [_field(g, 0, []) for g in feature_groups]
-                if any(not isinstance(c, list) or any(type(v) is not int or v <= 0 for v in c) for c in combinations):
-                    raise ValueError("Entradas de modelo não reconhecidas.")
-                variant["input_feature_codes"] = combinations
-                variants.append(variant)
-            models.append({"model_id":identifier, "label":label, "variants":variants,
-                           "disabled":not any(v["available"] for v in variants)})
+            # Modelo novo/alterado pelo Flow fica fora da lista sem bloquear os demais.
+            try:
+                model = _parse_model(group, mode, tier, statuses)
+            except (ValueError, TypeError, IndexError):
+                continue
+            models.append(model)
         result[mode] = {"models":models}
     return result
+
+
+def _parse_model(group, mode, tier, statuses):
+    label, identifier, usages = _field(group, 0), _key(_field(group, 3)), _field(group, 1)
+    if not isinstance(label, str) or not label or len(label) > 200 or not isinstance(usages, list):
+        raise ValueError("Modelo do catálogo não reconhecido.")
+    variants = []
+    for row in usages:
+        try:
+            variants.append(_parse_variant(row, mode, tier, statuses, identifier))
+        except (ValueError, TypeError, IndexError):
+            continue  # Variante em formato novo: indisponível, sem derrubar o modelo.
+    return {"model_id":identifier, "label":label, "variants":variants,
+            "disabled":not any(v["available"] for v in variants)}
+
+
+def _parse_variant(row, mode, tier, statuses, identifier):
+    key = _key(_field(row, 0))
+    entries = _field(row, 4, [])
+    if not isinstance(entries, list):
+        raise ValueError("Preços do catálogo não reconhecidos.")
+    price = _price(entries, tier)
+    state = statuses.get(key, statuses.get(identifier))
+    blocked = state is not None and state["blocked"]
+    aspect_codes = _field(_field(row, 12 if mode == "video" else 13, []), 0, [])
+    aspect_map = {1:"9:16", 2:"16:9"} if mode == "video" else {
+        1:"1:1", 2:"9:16", 3:"16:9", 4:"3:4", 5:"4:3"}
+    if not isinstance(aspect_codes, list) or any(type(c) is not int for c in aspect_codes):
+        raise ValueError("Proporções do catálogo não reconhecidas.")
+    # Desde 05/10/2026 o Flow repete códigos e inclui 0 (não especificado); código desconhecido não é oferecido.
+    known = [c for c in aspect_codes if c in aspect_map]
+    if aspect_codes and not known:
+        raise ValueError("Proporções do catálogo não reconhecidas.")
+    variant = {"model_key":key, "credits_per_output":price,
+        "available":price is not None and not blocked,
+        "availability_reason":"remote_restriction" if blocked else "tier_unavailable" if price is None else None,
+        "aspects":list(dict.fromkeys(aspect_map[c] for c in (known or list(aspect_map))))}
+    if mode == "video":
+        duration = _field(row, 16, 8)
+        resolutions = _field(_field(row, 23, []), 0, []) or [1]
+        resolution_map = {1:"720p", 2:"1080p", 3:"4k", 4:"360p"}
+        if (type(duration) is not int or duration <= 0 or not isinstance(resolutions, list)
+                or any(type(c) is not int for c in resolutions)):
+            raise ValueError("Formato de vídeo do catálogo não reconhecido.")
+        # Resolução nova (código desconhecido) não é oferecida.
+        resolutions = [c for c in resolutions if c in resolution_map]
+        if not resolutions:
+            raise ValueError("Resoluções do catálogo não reconhecidas.")
+        variant.update(duration_seconds=duration,
+                       duration_adjustable=_field(row, 22, False) is True,
+                       resolutions=list(dict.fromkeys(resolution_map[c] for c in resolutions)))
+    feature_groups = _field(_field(row, 7 if mode == "video" else 8, []), 0, [])
+    if not isinstance(feature_groups, list):
+        raise ValueError("Entradas do catálogo não reconhecidas.")
+    combinations = [_field(g, 0, []) for g in feature_groups]
+    if any(not isinstance(c, list) or any(type(v) is not int or v <= 0 for v in c) for c in combinations):
+        raise ValueError("Entradas de modelo não reconhecidas.")
+    variant["input_feature_codes"] = combinations
+    return variant
 
 
 def quote_configuration(capabilities, model, *, aspect, count, max_credits, features,
@@ -129,7 +152,8 @@ def quote_configuration(capabilities, model, *, aspect, count, max_credits, feat
     families = [m for m in capabilities["modes"][mode]["models"]
                 if m["model_id"] == identifiers[model]]
     if len(families) != 1:
-        raise ValueError("Modelo solicitado ausente do catálogo.")
+        raise ValueError(f"Modelo {model} ausente do catálogo desta conta (o Flow pode tê-lo renomeado); "
+                         "consulte flow_get_capabilities.")
     for variant in families[0]["variants"]:
         if (not variant["available"] or aspect not in variant["aspects"]
                 or not any(set(c) == set(features) for c in variant["input_feature_codes"])):
@@ -139,11 +163,45 @@ def quote_configuration(capabilities, model, *, aspect, count, max_credits, feat
             continue
         total = variant["credits_per_output"] * count
         if total > max_credits:
-            raise ValueError("Custo acima do orçamento autorizado.")
+            raise ValueError(f"Custo de {total} créditos acima do orçamento autorizado (max_credits={max_credits}); "
+                             "nada foi enviado.")
         return {"model_key":variant["model_key"], "credits_per_output":variant["credits_per_output"],
                 "quoted_credits":total, "source":"HTTP/HTrJv", "service_tier_code":capabilities["service_tier_code"],
                 "observed_at":capabilities["observed_at"]}
-    raise ValueError("Configuração solicitada não disponível nesta conta; envio bloqueado.")
+    raise ValueError("Configuração solicitada não disponível nesta conta; envio bloqueado. "
+                     f"Opções de {model}: {_describe_variants(families[0]['variants'], mode, features)}.")
+
+
+# Nomes legíveis dos códigos de entrada usados em `features`.
+_FEATURE_NAMES = {1: "texto", 4: "referências", 5: "quadro inicial", 6: "referências",
+                  7: "quadro final", 14: "extensão", 18: "edição", 19: "edição", 20: "edição"}
+
+
+def _inputs(combo) -> str:
+    return "+".join(dict.fromkeys(_FEATURE_NAMES.get(code, str(code)) for code in combo))
+
+
+def _describe_variants(variants, mode, features) -> str:
+    """Resumo curto do que existe, para o agente ajustar o pedido.
+
+    Com as mesmas entradas pedidas, lista formato/duração/resolução/custo; sem
+    nenhuma variante para essas entradas, lista as combinações de entrada aceitas.
+    """
+    available = [v for v in variants if v["available"]]
+    same_inputs = [v for v in available if any(set(c) == set(features) for c in v["input_feature_codes"])]
+    if not same_inputs:
+        combos = sorted({_inputs(c) for v in available for c in v["input_feature_codes"]})
+        return (f"nenhuma variante aceita as entradas pedidas ({_inputs(features)}); entradas aceitas: "
+                + (", ".join(combos) or "nenhuma neste plano"))
+    options = []
+    for variant in same_inputs:
+        size = ""
+        if mode == "video":
+            duration = "duração ajustável" if variant["duration_adjustable"] else f"{variant['duration_seconds']}s"
+            size = f"{duration} {'/'.join(variant['resolutions'])} "
+        options.append(f"{size}{'/'.join(variant['aspects'])} = {variant['credits_per_output']} créditos")
+    text = "; ".join(dict.fromkeys(options))
+    return text if len(text) <= 600 else text[:600] + "… (veja flow_get_capabilities)"
 
 
 async def read_capabilities(account_id: str, project_id: str, *, client=None) -> dict:

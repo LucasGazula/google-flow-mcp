@@ -4,12 +4,30 @@ import asyncio
 from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 import json
 import os
-import re
 from pathlib import Path
 import sys
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import httpx
+
+# Leituras sem efeito no Flow: podem ser repetidas uma vez após renovar os cookies.
+READ_ONLY_RPCS = {"UpteDb", "Zzl0ze", "Yizz8d", "nzlxg", "HTrJv", "as29s", "mrlkwd", "tRARke", "GN0Bre"}
+SESSION_LOST = ("A conta não está autenticada no Flow (redirecionada para o login ou para a página "
+                "de apresentação); refaça o login da conta antes de continuar.")
+
+
+def require_flow_page(page):
+    """Erro claro quando o Google redireciona para login em vez de abrir o Flow.
+
+    Deslogado, o Flow manda para flow.google.com/about (observado na Pi em 05/10/2026)
+    ou para o login do Google.
+    """
+    url = getattr(page, "url", None)
+    if not isinstance(url, str):
+        return
+    parts = urlsplit(url)
+    if (parts.hostname or "flow.google.com") != "flow.google.com" or parts.path.startswith("/about"):
+        raise ValueError(SESSION_LOST)
 
 
 class FlowHTTP:
@@ -61,6 +79,17 @@ class FlowHTTP:
         self.client = httpx.AsyncClient(cookies=jar, headers={"User-Agent": agent},
                                        follow_redirects=False, timeout=120, trust_env=False)
 
+    async def refresh_session(self):
+        """Recopiar os cookies do Chrome, que o Google rotaciona; mantém os modelos de RPC."""
+        from flow_browser import account_page
+
+        pages = self.browser.page() if self.browser is not None else account_page(self.account_id)
+        async with pages as page:
+            await page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(2000)
+            require_flow_page(page)
+            await self.session_from_page(page)
+
     async def capture_submit(self, page, submit, rpc_ids):
         """Bloquear o envio do navegador e manter a requisição apenas em memória.
 
@@ -97,7 +126,12 @@ class FlowHTTP:
 
         await page.route("**/*", block)
         await submit.click(timeout=5000)
-        captured = await asyncio.wait_for(found, 30)
+        try:
+            captured = await asyncio.wait_for(found, 30)
+        except asyncio.TimeoutError:
+            require_flow_page(page)
+            raise ValueError(f"O site não emitiu o pedido esperado ({', '.join(sorted(rpc_ids))}) em 30 s após "
+                             "o clique; a interface do Flow pode ter mudado. Nada foi enviado.") from None
         await self.session_from_page(page)
         return captured
 
@@ -109,7 +143,7 @@ class FlowHTTP:
         response = await self.client.post(captured["url"], content=captured["body"],
                                           headers=captured["headers"], timeout=600)
         if response.status_code != 200:
-            raise ValueError("Envio HTTP inconclusivo; não reenviar automaticamente.")
+            raise ValueError(f"Envio HTTP inconclusivo (HTTP {response.status_code}); não reenviar automaticamente.")
         frames = [payload for rpc, payload in parse_frames(response.text) if rpc == captured["rpc_id"]]
         if len(frames) != 1 or frames[0] is None:
             raise ValueError("Resposta do envio HTTP não reconhecida.")
@@ -216,10 +250,18 @@ class FlowHTTP:
             page.on("response", observe)
             try:
                 await page.goto(target, wait_until="domcontentloaded", timeout=45000)
-                if rpc_id == "nzlxg" and not found.done():
-                    await page.get_by_role("button", name=re.compile(r"^Novo projeto$|^New project$")).wait_for(timeout=15000)
-                    await page.get_by_role("button", name=re.compile(r"^Detalhes da conta$|^Account details$")).click(timeout=5000)
-                await asyncio.wait_for(found, 60)
+                # Até 60 s pela consulta; a cada 5 s confere se a conta foi mandada para o login.
+                for _ in range(12):
+                    try:
+                        await asyncio.wait_for(asyncio.shield(found), 5)
+                        break
+                    except asyncio.TimeoutError:
+                        require_flow_page(page)
+                else:
+                    if rpc_id == "as29s":
+                        raise asyncio.TimeoutError
+                    raise ValueError(f"A página do Flow não fez a consulta {rpc_id} em 60 s (site lento ou "
+                                     "interface mudada); nada foi enviado.")
                 captcha = None
                 if captcha_action in {"IMAGE_GENERATION", "VIDEO_GENERATION"}:
                     from gflow_cli.api.transports.migrated_composer import MigratedComposer, IMAGE_SUBMIT_RPC, SUBMIT_RPCS
@@ -257,6 +299,7 @@ class FlowHTTP:
                         }""", captcha_action)
                     await self.session_from_page(page)
             except asyncio.TimeoutError:
+                require_flow_page(page)
                 if rpc_id == "as29s":
                     raise ValueError("Vídeo original ainda não disponível.") from None
                 raise
@@ -265,11 +308,16 @@ class FlowHTTP:
         # Página de preparo fechada antes do POST; worker residente mantém só o contexto.
         return captcha
 
-    async def rpc(self, rpc_id, project_id=None, media_id=None, workflow_id=None, params=None):
+    async def rpc(self, rpc_id, project_id=None, media_id=None, workflow_id=None, params=None,
+                  *, _refreshed=False):
         from gflow_cli.api.transports.batchexecute import parse_frames
 
-        if rpc_id == "nzlxg" and params is None and rpc_id not in self.templates and "UpteDb" in self.templates:
-            params = []  # Saldo usa a sessão já preparada, sem reabrir o menu da conta.
+        explicit_params = params
+
+        if rpc_id == "nzlxg" and params is None and rpc_id not in self.templates:
+            # Saldo usa a sessão da listagem de projetos: carregar a página basta, sem clicar no
+            # menu da conta (o clique falhava após a verificação de login no Linux).
+            params = []
         if params is not None and rpc_id not in {"jHPbke", "o8DA4", "ngNC2", "HTrJv", "yBhWQ", "nzlxg", "QI2zvc", "Uxbujd", "O2COMe", "kVdhHf", "DA4VGb", "mrlkwd", "TunYMc", "csbIsb", "Dcn2Le", "oWTRd", "GoMJte", "GjQLTd", "IxdSwd", "BpMsoe", "tRARke", "GN0Bre", "cz8Z4b", "pGCYOe", "C4BZMd", "Sc7aEb", "rzMKMb", "Kcr7Ub"}:
             raise ValueError("Parâmetros explícitos não autorizados para este RPC.")
         if params is not None:
@@ -314,10 +362,22 @@ class FlowHTTP:
         request = encode_rpc(template, rpc_id, replace(params))
         response = await self.client.post(request["url"], content=request["body"], headers=request["headers"])
         if response.status_code != 200:
-            raise ValueError("Consulta HTTP não concluída; sessão pode exigir renovação.")
+            if rpc_id in READ_ONLY_RPCS and not _refreshed and self.client is not None:
+                # Cookies copiados há horas podem ter sido rotacionados; leitura é segura de repetir.
+                await self.refresh_session()
+                return await self.rpc(rpc_id, project_id, media_id, workflow_id, explicit_params,
+                                      _refreshed=True)
+            raise ValueError(f"Flow respondeu HTTP {response.status_code} a {rpc_id}; a sessão pode "
+                             "exigir novo login (flow_account_status).")
         payloads = [payload for rid, payload in parse_frames(response.text) if rid == rpc_id]
         if len(payloads) != 1 or payloads[0] is None:
-            raise ValueError("Resposta RPC HTTP não reconhecida.")
+            if rpc_id == "as29s" and media_id:
+                from flow_assets import MediaAbsent
+
+                raise MediaAbsent("Mídia esperada ausente do acompanhamento.")
+            raise ValueError(f"O Flow não retornou dados para {rpc_id}"
+                             + (" (projeto inexistente ou de outra conta?)" if project_id else "")
+                             + "; confira os IDs e a conta.")
         return payloads[0]
 
     async def download(self, url, media_id):
@@ -412,6 +472,10 @@ async def http_operation(client, action, payload):
         from flow_video import refine_video
 
         return await refine_video(client.account_id, **payload, client=client)
+    if action == "quote_images":
+        from flow_video import quote_images
+
+        return await quote_images(client.account_id, **payload, client=client)
     if action == "quote_video":
         from flow_video import generate_video
 
@@ -532,8 +596,10 @@ async def http_operation(client, action, payload):
                   "generation_enabled":False, "source":"HTTP/nzlxg", "service_tier":None}
         try:
             result.update(credits=parse_http_credits(await client.rpc("nzlxg")), status="ok")
-        except Exception:
-            pass  # Falha de leitura não significa saldo zero nem sessão expirada.
+        except Exception as exc:
+            from flow_errors import error_fields
+
+            result.update(error_fields(exc))  # Falha de leitura não significa saldo zero nem sessão expirada.
         result["observed_at"] = datetime.now(timezone.utc).isoformat()
         return result
     if action == "project":
@@ -561,7 +627,7 @@ async def http_operation(client, action, payload):
             needle = query.casefold()
             result["projects"] = [
                 project for project in result["projects"]
-                if needle in project["project_id"].casefold() or needle in project["title"].casefold()
+                if needle in project["project_id"].casefold() or needle in (project["title"] or "").casefold()
             ]
         return {"account_id": client.account_id, "status": "ok", "source": "HTTP/UpteDb",
                 **result}
@@ -571,6 +637,8 @@ async def http_operation(client, action, payload):
 
         collection_id = validate_collection_id(collection_id)
     project_id = validate_project(payload["project_id"])
+    if action in {"get_asset", "download_asset"}:
+        media_uuid(payload["media_id"])  # ID inválido não precisa consultar o Flow.
     data = await client.rpc("Zzl0ze", project_id=project_id)
     if action == "collections":
         from flow_collections import parse_collections
@@ -582,7 +650,8 @@ async def http_operation(client, action, payload):
         from flow_edit import asset_details
 
         return asset_details(data, client.account_id, project_id, payload["media_id"])
-    assets = parse_assets(data, project_id)
+    skipped = []
+    assets = parse_assets(data, project_id, skipped)
     if action == "assets":
         query = payload.get("query", "")
         kind = payload.get("kind")
@@ -636,13 +705,17 @@ async def http_operation(client, action, payload):
 
         return {"account_id": client.account_id, "project_id": project_id, "status": "ok",
                 "source": "HTTP/Zzl0ze", "assets": assets, "complete": False,
-                "scope": "Resposta inicial; paginação ainda não validada."}
+                "scope": "Resposta inicial; paginação ainda não validada.",
+                **({"unrecognized_media": skipped} if skipped else {})}
     if action != "download_asset":
         raise ValueError("Operação HTTP inválida.")
     media_id = media_uuid(payload["media_id"])
     asset = next((item for item in assets if item["media_id"] == media_id), None)
     if asset is None:
-        raise ValueError("Mídia ausente da resposta inicial.")
+        if any(item["media_id"] == media_id for item in skipped):
+            raise ValueError("Mídia presente, mas em formato que o MCP ainda não reconhece; o Flow pode ter mudado.")
+        raise ValueError("Mídia ausente da resposta inicial do projeto (ainda processando, em outro "
+                         "projeto/conta, ou além da primeira página).")
     from flow_video import image_suffix, original_image_url
     from flow_assets import video_record as generation_record
     from gflow_cli.api.transports.migrated_recover import _verify
@@ -665,8 +738,9 @@ async def http_operation(client, action, payload):
         body = await client.download(record.video_url, media_id)
         _verify(body, expected=record.size_bytes, media_id=media_id)
         suffix = ".mp4"
-    output = Path(os.environ.get("FLOW_MCP_OUTPUT", Path(__file__).parent / "downloads")).resolve()
-    output.mkdir(parents=True, exist_ok=True)
+    from flow_video import downloads_dir
+
+    output = downloads_dir()
     target = output / f"{media_id}{suffix}"
     target.write_bytes(body)
     return {"account_id": client.account_id, "project_id": project_id, "media_id": media_id,
@@ -693,31 +767,98 @@ async def close_workers():
     _locks.clear()
 
 
+# Operações longas (geração + acompanhamento de até 20 min, downloads em lote).
+_LONG_ACTIONS = {"generate", "images", "edit_image", "edit_video", "extend_video", "upscale",
+                 "build_scene", "download_project", "export_scene"}
+_MEDIUM_ACTIONS = {"connect", "import", "upload_asset", "agent_request"}
+# Respostas grandes (listagens de projetos/ativos) passam do limite padrão de 64 KiB por linha.
+_WORKER_LINE_LIMIT = 64 * 1024 * 1024
+
+
+def worker_timeout(action, payload) -> int:
+    """Prazo em segundos para a resposta do worker a uma ação."""
+    payload = payload if isinstance(payload, dict) else {}
+    if action == "refine_video" and isinstance(payload.get("refinements"), list):
+        return 1260 * min(3, max(1, len(payload["refinements"])))
+    if action == "edit_images" and isinstance(payload.get("media_ids"), list):
+        return 1260 * min(10, max(1, len(payload["media_ids"])))
+    if action in _LONG_ACTIONS or action in {"refine_video", "edit_images"} or (
+            action == "manage_character" and payload.get("description")):
+        return 1260
+    return 660 if action in _MEDIUM_ACTIONS else 240
+
+
+async def _start_worker(account_id, env, root):
+    process = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).resolve()), "--worker", account_id,
+        env=env, cwd=root, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL, limit=_WORKER_LINE_LIMIT)
+    _workers[account_id] = process
+    return process
+
+
+async def _stop_worker(account_id, process):
+    if process.returncode is None:
+        process.kill()
+        await process.wait()
+    _workers.pop(account_id, None)
+
+
+# O worker de cada conta é serial: espera curta pela vez; depois responde "ocupada" em vez de travar.
+BUSY_GRACE_SECONDS = 30
+_running = {}
+
+
 async def run_worker_operation(account_id, action, payload, env, root):
     lock = _locks.setdefault(account_id, asyncio.Lock())
-    async with lock:
-        process = _workers.get(account_id)
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(lock.acquire(), BUSY_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        running, started = _running.get(account_id, (None, loop.time()))
+        return {"status": "account_busy", "action": action, "running_action": running,
+                "running_seconds": round(loop.time() - started),
+                "message": f"A conta está ocupada com outra operação ({running}); nada foi enviado."}
+    _running[account_id] = (action, loop.time())
+    try:
+        return await _run_locked(account_id, action, payload, env, root)
+    finally:
+        _running.pop(account_id, None)
+        lock.release()
+
+
+async def _run_locked(account_id, action, payload, env, root):
+    request = json.dumps({"action": action, "payload": payload or {}}).encode() + b"\n"
+    process = _workers.get(account_id)
+    for attempt in range(2):
         if process is None or process.returncode is not None:
-            process = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).resolve()), "--worker", account_id,
-                env=env, cwd=root, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-            _workers[account_id] = process
+            process = await _start_worker(account_id, env, root)
         try:
-            request = json.dumps({"action": action, "payload": payload or {}}).encode() + b"\n"
             process.stdin.write(request)
             await process.stdin.drain()
-            batch_ids = payload.get("media_ids") if isinstance(payload, dict) else None
-            batch_size = min(10, max(1, len(batch_ids))) if action == "edit_images" and isinstance(batch_ids, list) else 1
-            refinements = payload.get("refinements") if isinstance(payload, dict) else None
-            refine_size = min(3, max(1, len(refinements))) if isinstance(refinements, list) else 1
-            timeout = 1260 * refine_size if action == "refine_video" else 1260 * batch_size if action == "edit_images" else 1260 if action in {"generate", "images", "edit_image", "edit_video", "extend_video", "upscale", "build_scene", "download_project", "export_scene"} or action == "manage_character" and (payload or {}).get("description") else 660 if action in {"connect", "import", "upload_asset", "agent_request"} else 240
-            response = await asyncio.wait_for(process.stdout.readline(), timeout)
-            return json.loads(response)
-        except (asyncio.TimeoutError, ValueError, OSError):
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            _workers.pop(account_id, None)
-            return {"status": "http_worker_error", "message": "Consulta HTTP inconclusiva; não houve reenvio automático."}
+            break
+        except (OSError, RuntimeError):
+            # Worker morto antes de receber o pedido: nada foi enviado ao Flow; reiniciar é seguro.
+            await _stop_worker(account_id, process)
+            process = None
+            if attempt:
+                return {"status": "http_worker_error", "action": action,
+                        "message": "Não foi possível iniciar o worker da conta; nada foi enviado ao Flow."}
+    try:
+        response = await asyncio.wait_for(process.stdout.readline(), worker_timeout(action, payload))
+        if not response:
+            raise EOFError
+        return json.loads(response)
+    except (asyncio.TimeoutError, EOFError, ValueError, OSError) as exc:
+        await _stop_worker(account_id, process)
+        reason = ("tempo esgotado" if isinstance(exc, asyncio.TimeoutError)
+                  else "worker encerrado durante a operação" if isinstance(exc, EOFError)
+                  else "resposta ilegível do worker")
+        return {"status": "http_worker_error", "action": action,
+                "message": f"Worker da conta sem resposta ({reason}) e reiniciado; não houve reenvio automático."}
+
+
+# Chrome ocioso é fechado (libera memória e o lease do perfil); o próximo pedido o reabre.
+WORKER_IDLE_SECONDS = float(os.environ.get("FLOW_MCP_WORKER_IDLE_SECONDS", "900"))
 
 
 async def worker(account_id, input_stream, output_stream):
@@ -727,11 +868,22 @@ async def worker(account_id, input_stream, output_stream):
     client = FlowHTTP(account_id, resident=True)
     try:
         while True:
-            raw = await asyncio.to_thread(input_stream.readline, 1024 * 1024 + 1)
+            read = asyncio.ensure_future(asyncio.to_thread(input_stream.readline, 1024 * 1024 + 1))
+            while not (await asyncio.wait({read}, timeout=WORKER_IDLE_SECONDS))[0]:
+                browser = getattr(client, "browser", None)
+                # Confirmação de upload pendente depende da página aberta: não fechar.
+                if getattr(client, "pending_upload", None) is None and getattr(browser, "context", None) is not None:
+                    await client.close()
+                    client = FlowHTTP(account_id, resident=True)
+            raw = read.result()
             if not raw:
                 break
+            request = None
             try:
-                request = json.loads(raw)
+                try:
+                    request = json.loads(raw)
+                except ValueError:
+                    raise ValueError("Pedido ao worker ilegível ou maior que 1 MiB.") from None
                 if request["action"] in {"connect", "status", "import"}:
                     from flow_accounts import account_operation
 
@@ -741,9 +893,13 @@ async def worker(account_id, input_stream, output_stream):
                 else:
                     result = await http_operation(client, request["action"], request.get("payload") or {})
             except Exception as exc:
-                result = {"status": "http_error", "error_type": type(exc).__name__,
-                          "message": "Falha HTTP; dados da sessão e respostas privadas foram omitidos."}
-            output_stream.write(json.dumps(result) + "\n")
+                from flow_errors import error_fields
+
+                # Só mensagens escritas pelo MCP; respostas privadas do Flow são omitidas.
+                result = {"status": "http_error", "action": request.get("action") if isinstance(request, dict) else None,
+                          **error_fields(exc)}
+            # default=str: um valor não serializável (ex.: Path) não pode derrubar o worker.
+            output_stream.write(json.dumps(result, default=str) + "\n")
             output_stream.flush()
     finally:
         await client.close()

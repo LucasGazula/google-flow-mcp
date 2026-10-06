@@ -195,11 +195,11 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
         response = SimpleNamespace(url="https://flow.google.com/_/Ui/data/batchexecute",
             text=AsyncMock(return_value="frames"), request=SimpleNamespace(
                 url="https://flow.google.com/_/Ui/data/batchexecute",
-                post_data="f.req="+json.dumps([[["nzlxg","[]",None,"generic"]]]), headers={}))
-        async def click(**kwargs):
-            await listeners["response"](response)
-        button = SimpleNamespace(click=AsyncMock(side_effect=click),wait_for=AsyncMock())
-        page = SimpleNamespace(goto=AsyncMock(),get_by_role=lambda *args, **kwargs:button,
+                post_data="f.req="+json.dumps([[["UpteDb","[]",None,"generic"]]]), headers={}))
+        async def goto(*args, **kwargs):
+            await listeners["response"](response)  # a própria página lista os projetos ao carregar
+        button = SimpleNamespace(click=AsyncMock(),wait_for=AsyncMock())
+        page = SimpleNamespace(goto=AsyncMock(side_effect=goto),get_by_role=lambda *args, **kwargs:button,
             on=lambda name,cb:listeners.update({name:cb}),remove_listener=lambda name,cb:listeners.pop(name))
         @asynccontextmanager
         async def browser(account):
@@ -220,7 +220,7 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["credits"],946)
         self.assertEqual(second["source"],"HTTP/nzlxg")
         self.assertEqual(client.client.post.await_count,2)
-        button.click.assert_awaited_once()
+        button.click.assert_not_awaited()  # saldo sem clicar no menu da conta
         page.goto.assert_awaited_once()
 
     async def test_native_prepare_gets_fresh_captcha_and_closes_before_post(self):

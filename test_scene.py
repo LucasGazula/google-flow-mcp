@@ -39,10 +39,12 @@ class SceneTest(unittest.IsolatedAsyncioTestCase):
         payload[4] = [row[:7] + [[True]]]
         self.assertTrue(parse_scenes(payload, project)[0]["archived"])
         payload[4] = [row]
-        for rows in ([row, row], [[scene, "title", None, None, None, True, None, []]], "bad"):
+        for rows in ([row, row], "bad"):
             payload[4] = rows
             with self.assertRaises(ValueError):
                 parse_scenes(payload, project)
+        payload[4] = [row, [scene, "title", None, None, None, True, None, []]]
+        self.assertEqual(len(parse_scenes(payload, project)), 1)  # linha desconhecida é ignorada
         payload[4] = None
         self.assertEqual(parse_scenes(payload, project), [])
 

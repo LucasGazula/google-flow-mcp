@@ -35,7 +35,10 @@ async def check(account: str) -> dict:
     client, t, fp = FlowHTTP(account, resident=True), time.monotonic(), None
     try:
         r = await asyncio.wait_for(http_operation(client, "credits", {}), 180)
-        out = {"status": r.get("status"), "credits": r.get("credits")}
+        # Perfil segurado pelo worker residente do MCP: ocupado, não sessão perdida.
+        busy = r.get("error_type") == "ProfileLockedError"
+        out = {"status": "busy" if busy else r.get("status"), "credits": r.get("credits"),
+               **{key: r[key] for key in ("error_type", "error") if r.get(key)}}
     except Exception as exc:
         busy = "lease" in type(exc).__name__.lower() or "lock" in type(exc).__name__.lower()
         out = {"status": "busy" if busy else "error", "error_type": type(exc).__name__}
@@ -48,8 +51,9 @@ async def check(account: str) -> dict:
 
 def update_state(state: dict, r: dict) -> dict:
     s = state.setdefault(r["account_id"], {"failures": 0, "last_ok": None, "last_fp": None, "rotations": 0})
+    s["last_check"], s["last_status"] = r["at"], r["status"]
     if r["status"] == "ok":
-        s["failures"], s["last_ok"] = 0, r["at"]
+        s["failures"], s["last_ok"], s["last_credits"] = 0, r["at"], r.get("credits")
         if r["rotation_fp"] and s["last_fp"] and r["rotation_fp"] != s["last_fp"]:
             s["rotations"] += 1
         s["last_fp"] = r["rotation_fp"] or s["last_fp"]
@@ -68,7 +72,10 @@ async def main(log: Path, state_path: Path) -> int:
         print(json.dumps({"status": "skipped", "reason": "outra execução em andamento"}))
         return 0
     root = Path(os.environ.get("FLOW_MCP_HOME", Path(__file__).parent / "profiles"))
-    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}  # Estado ausente ou corrompido (ex.: queda do SSD) não impede a checagem.
     results = []
     for i, account in enumerate(accounts(root)):
         if i:
@@ -76,8 +83,10 @@ async def main(log: Path, state_path: Path) -> int:
         r = await check(account)
         r["needs_login"] = update_state(state, r)["needs_login"]
         results.append(r)
-    state_path.write_text(json.dumps(state, indent=1))
-    state_path.chmod(0o600)
+    temp = state_path.with_suffix(".tmp")
+    temp.write_text(json.dumps(state, indent=1))
+    temp.chmod(0o600)
+    temp.replace(state_path)  # Troca atômica: leitores (flow_list_accounts) nunca veem arquivo pela metade.
     lines = (log.read_text(encoding="utf-8").splitlines() if log.exists() else []) + [json.dumps(r) for r in results]
     log.write_text("\n".join(lines[-MAX_LINES:]) + "\n", encoding="utf-8")
     for r in results:
