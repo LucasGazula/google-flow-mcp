@@ -191,7 +191,9 @@ class AssetTest(unittest.TestCase):
         for marker,revision in (("CAE",1),("CAI",2),("CAM",3),("CAQ",4),("CIAB",128)):
             row[3]=marker
             self.assertEqual(parse_assets(payload,project)[0]["revision"],revision)
-        for marker in ("CAA","CAEA","invalid",None):
+        self.assertEqual(media_revision(None), 1)  # versão 1 omitida pelo Flow desde 05/10/2026
+        self.assertEqual(parse_assets([None] * 8, project), [])  # projeto vazio vem com listas null
+        for marker in ("CAA","CAEA","invalid",""):
             with self.assertRaises(ValueError):
                 media_revision(marker)
         row[3] = "unknown"
@@ -219,7 +221,7 @@ class AssetTest(unittest.TestCase):
         self.assertFalse(asset_map[image2]["archived"])
 
 
-    def test_parse_assets_ignores_character_unversioned_copy_and_rejects_other_none_revision(self):
+    def test_parse_assets_ignores_character_copy_and_reads_missing_revision_as_one(self):
         project, normal_img, normal_wf = (str(uuid4()) for _ in range(3))
         char_ref_img, char_wf, entity_id = (str(uuid4()) for _ in range(3))
         normal_row = [normal_img, project, normal_wf, "CAE", None, [None] * 14, [None, None, [1024, 1024]]]
@@ -230,9 +232,9 @@ class AssetTest(unittest.TestCase):
         self.assertEqual(len(assets), 1)
         self.assertEqual(assets[0]["media_id"], normal_img)
 
+        # Desde 05/10/2026 o Flow omite a versão 1 em mídias novas.
         payload_without_char = [None, [], [normal_row, char_copy_row], [], None, [], None, []]
-        with self.assertRaises(ValueError):
-            parse_assets(payload_without_char, project)
+        self.assertEqual([a["revision"] for a in parse_assets(payload_without_char, project)], [1, 1])
 
 
 class HTTPAssetListingTest(unittest.IsolatedAsyncioTestCase):

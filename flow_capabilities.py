@@ -78,8 +78,13 @@ def parse_capabilities(payload, tier, statuses):
                 aspect_codes = _field(_field(row, 12 if mode == "video" else 13, []), 0, [])
                 aspect_map = {1:"9:16", 2:"16:9"} if mode == "video" else {
                     1:"1:1", 2:"9:16", 3:"16:9", 4:"3:4", 5:"4:3"}
-                if not isinstance(aspect_codes, list) or any(type(c) is not int or c not in aspect_map for c in aspect_codes):
+                if not isinstance(aspect_codes, list) or any(type(c) is not int for c in aspect_codes):
                     raise ValueError("Proporções do catálogo não reconhecidas.")
+                # Desde 05/10/2026 o Flow repete códigos e inclui 0 (não especificado); código desconhecido não é oferecido.
+                known = [c for c in aspect_codes if c in aspect_map]
+                if aspect_codes and not known:
+                    raise ValueError("Proporções do catálogo não reconhecidas.")
+                aspect_codes = known
                 variant = {"model_key":key, "credits_per_output":price,
                     "available":price is not None and not blocked,
                     "availability_reason":"remote_restriction" if blocked else "tier_unavailable" if price is None else None,
@@ -113,7 +118,8 @@ def quote_configuration(capabilities, model, *, aspect, count, max_credits, feat
     """Escolher somente a família pedida e o conjunto exato de entradas."""
     identifiers = {"veo-lite":"veo_3_1_lite", "veo-fast":"veo_3_1_fast",
         "veo-quality":"veo_3_1_quality", "omni-flash":"abra",
-        "nano-banana-2":"narwhal_display", "nano-banana-2-lite":"harbor_seal",
+        # Em 05/10/2026 o Flow trocou Nano Banana 2 (narwhal_display) por Nano Banana 2.1.
+        "nano-banana-2":"beluga_display", "nano-banana-2-lite":"harbor_seal",
         "nano-pro":"nano_banana_pro"}
     if model not in identifiers or type(count) is not int or not 1 <= count <= 4:
         raise ValueError("Modelo ou quantidade inválidos.")

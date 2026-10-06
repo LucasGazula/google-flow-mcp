@@ -253,6 +253,10 @@ class VideoEditTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row[3],"CAI")
         with self.assertRaises(ValueError):
             video_record("as29s",[row,row])
+        # Desde 05/10/2026 vídeos novos chegam sem a versão 1.
+        fresh = video_row(*(str(uuid4()) for _ in range(3)),revision=None)
+        self.assertTrue(video_record("as29s",fresh).is_done)
+        self.assertIsNone(fresh[3])
 
     def test_legacy_video_jobs_migrate_ids_once_and_keep_downloads(self):
         from gflow_cli.config import get_settings

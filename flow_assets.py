@@ -27,8 +27,13 @@ def media_uuid(value: str) -> str:
     return value
 
 
-def media_revision(value: str) -> int:
-    """Campo protobuf em base64: CAE=1, CAI=2, CAM=3, ..."""
+def media_revision(value: str | None) -> int:
+    """Campo protobuf em base64: CAE=1, CAI=2, CAM=3, ...
+
+    Desde 05/10/2026 o Flow omite a versão 1 (valor padrão) em mídias novas.
+    """
+    if value is None:
+        return 1
     if not isinstance(value,str) or len(value)>16:
         raise ValueError("Versão de mídia inválida.")
     try:
@@ -50,7 +55,7 @@ def video_record(rpc, payload):
     from gflow_cli.api.transports.batchexecute import generation_record, _walk_lists
 
     rows = [r for r in _walk_lists(payload) if len(r) >= 6
-            and all(isinstance(r[i], str) for i in range(4))]
+            and all(isinstance(r[i], str) for i in range(3)) and (r[3] is None or isinstance(r[3], str))]
     if not rows:
         return generation_record(rpc, payload)
     if len(rows) != 1:
@@ -102,8 +107,11 @@ def image_download_url(payload, project_id, media_id):
 
 
 def parse_assets(payload, project_id: str) -> list[dict]:
-    if (not isinstance(payload, list) or len(payload) != 8
-            or not isinstance(payload[1], list) or not isinstance(payload[2], list)):
+    if not isinstance(payload, list) or len(payload) != 8:
+        raise ValueError("Resposta de mídia não reconhecida.")
+    # Projeto vazio: o Flow omite as listas (null) desde 05/10/2026.
+    payload = [*payload[:1], payload[1] or [], payload[2] or [], *payload[3:]]
+    if not isinstance(payload[1], list) or not isinstance(payload[2], list):
         raise ValueError("Resposta de mídia não reconhecida.")
     names, collections, archived = {}, {}, set()
     for workflow in payload[1]:

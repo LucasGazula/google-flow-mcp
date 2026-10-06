@@ -11,11 +11,11 @@ def catalog_fixture():
     video[0], video[4], video[7] = "veo_3_1_t2v_lite", [[1, [[None, 10]]], [2, [[None, 10]]]], [[[[1]]]]
     video[12], video[16], video[23] = [[2, 1]], 8, [[1]]
     image = [None] * 22
-    image[0], image[4], image[8] = "NARWHAL", [[2, [[None, 0]]]], [[[[1]], [[1, 4]]]]
-    image[13] = [[1, 2, 3, 4, 5, 2, 3]]
+    image[0], image[4], image[8] = "BELUGA", [[2, [[None, 0]]]], [[[[1]], [[1, 4]]]]
+    image[13] = [[1, 2, 3, 4, 5, 0, 0, 2, 3]]  # formato do catálogo desde 05/10/2026
     catalog = [None] * 8
     catalog[4] = [["Veo 3.1 - Lite", [video], True, "veo_3_1_lite"]]
-    catalog[5] = [["Nano Banana 2", [image], None, "narwhal_display"]]
+    catalog[5] = [["Nano Banana 2.1", [image], None, "beluga_display"]]
     return [catalog]
 
 

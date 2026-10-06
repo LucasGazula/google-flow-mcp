@@ -457,7 +457,9 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         payload = await client.send_submit(captured)
         records = {}
         for row in _walk_lists(payload):
-            if len(row) < 6 or not all(isinstance(row[i], str) for i in range(4)):
+            # Versão (campo 3) vem nula em mídias novas desde 05/10/2026.
+            if (len(row) < 6 or not all(isinstance(row[i], str) for i in range(3))
+                    or not (row[3] is None or isinstance(row[3], str))):
                 continue
             record = video_record(rpc, row)
             expected = dict(zip(job["request_media_ids"], job["request_workflow_ids"]))
