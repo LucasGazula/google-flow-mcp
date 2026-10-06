@@ -197,6 +197,7 @@ def flow_status() -> dict[str, Any]:
         chrome = bool(resolved_chrome_binary())
     except Exception:
         chrome = False
+    import flow_scene
     ffmpeg = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
     free_mb = shutil.disk_usage(downloads_dir()).free // 2**20
     return {"backend_status": "accounts_available", "backend": "gflow-cli==0.79.1",
@@ -204,8 +205,8 @@ def flow_status() -> dict[str, Any]:
             "version": _code_version(), "downloads_dir": str(downloads_dir()),
             "jobs_dir": str(root / "jobs"), "chrome_available": chrome, "ffmpeg_available": ffmpeg,
             "disk_free_mb": free_mb, **({"warning": "Pouco espaço em disco para downloads."} if free_mb < 2048 else {}),
-            **({} if ffmpeg else {"unavailable_tools": ["flow_save_frame", "flow_export_gif",
-                                                        "flow_build_scene", "flow_upscale"]}),
+            **({} if ffmpeg and not flow_scene.LIGHT_HOST else {"unavailable_tools": (
+                [] if ffmpeg else ["flow_save_frame"]) + flow_scene.HEAVY_FFMPEG_TOOLS}),
             "message": ("Arquivos baixados e caminhos de upload ficam nesta máquina. "
                         "Vídeo/imagem com orçamento explícito; detalhes em docs/IMPLEMENTACAO-FLOW.md.")}
 

@@ -425,6 +425,17 @@ class SceneTest(unittest.IsolatedAsyncioTestCase):
             mock_upload.assert_awaited_once()
             self.assertIn("flow_upload", res2)
 
+    async def test_heavy_ffmpeg_tools_blocked_on_arm(self):
+        project, media = str(uuid4()), str(uuid4())
+        client = MagicMock(account_id="conta-a", close=AsyncMock())
+        with patch("flow_scene.LIGHT_HOST", True):
+            for call in (export_video_gif("conta-a", project, media, client=client),
+                         build_scene("conta-a", project, [{"media_id": media}], client=client),
+                         upscale_media("conta-a", project, media, client=client)):
+                with self.assertRaisesRegex(RuntimeError, "ARM"):
+                    await call
+        client.assert_not_called()
+
     async def test_export_video_gif_validates_and_executes(self):
         project = str(uuid4())
         media = str(uuid4())

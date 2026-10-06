@@ -496,3 +496,7 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   Pi agora aparece `authenticated`, `verified_by=HTTP/UpteDb`). Saldo não clica mais no
   menu da conta (usa a sessão da listagem); conta deslogada é detectada em ~12 s.
   A Pi não tem ffmpeg (ferramentas locais de vídeo falham lá). Suítes WSL/Windows: 235 testes; MCP: 65 ferramentas (novo `flow_quote_images`).
+- ffmpeg na Pi (06/10/2026): em máquina ARM só `flow_save_frame` usa ffmpeg (1 thread,
+  `nice 19`); `flow_export_gif`, `flow_build_scene` e `flow_upscale` recusam antes de
+  baixar e apontam as alternativas nativas (`flow_export_scene`, `flow_upscale_video`/
+  `flow_upscale_image`). `flow_status` lista as indisponíveis. Suíte: 236 testes.

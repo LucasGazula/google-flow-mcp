@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import math
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 from uuid import uuid4
@@ -17,6 +18,16 @@ from flow_video import downloads_dir, get_job, save_job
 
 
 _SCENE_ID = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+# ponytail: ARM (Banana Pi) só extrai quadros; GIF/montagem/upscale local ficam no Windows.
+LIGHT_HOST = platform.machine().lower() in ("aarch64", "arm64", "armv7l")
+HEAVY_FFMPEG_TOOLS = ["flow_export_gif", "flow_build_scene", "flow_upscale"]
+
+
+def _heavy_ffmpeg_allowed():
+    if LIGHT_HOST:
+        raise RuntimeError("Processamento de vídeo pesado desativado nesta máquina (ARM) para não "
+                           "sobrecarregá-la. Use flow_export_scene ou flow_upscale_video/"
+                           "flow_upscale_image (nativos do Flow), ou o MCP do Windows.")
 
 
 def _scene_id(value: str) -> str:
@@ -540,7 +551,8 @@ async def save_video_frame(account_id: str, project_id: str, media_id: str,
 
         # ffmpeg: -ss antes de -i para busca rápida, extraindo 1 quadro com máxima qualidade
         cmd = [
-            ffmpeg_bin,
+            *(["nice", "-n", "19"] if shutil.which("nice") else []),
+            ffmpeg_bin, "-threads", "1",
             "-ss", f"{timestamp_seconds:.3f}",
             "-i", str(video_path),
             "-frames:v", "1",
@@ -600,6 +612,7 @@ async def export_video_gif(account_id: str, project_id: str, media_id: str,
     if not isinstance(width, int) or not 120 <= width <= 1920:
         raise ValueError("width deve ser um inteiro entre 120 e 1920.")
 
+    _heavy_ffmpeg_allowed()
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
         raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
@@ -718,6 +731,7 @@ async def build_scene(account_id: str, project_id: str, clips: list[dict],
         if trim_end is not None and (not isinstance(trim_end, (int, float)) or trim_end <= (trim_start or 0)):
             raise ValueError(f"trim_end do clipe {i} deve ser maior que trim_start.")
 
+    _heavy_ffmpeg_allowed()
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
         raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
@@ -845,6 +859,7 @@ async def upscale_media(account_id: str, project_id: str, media_id: str,
 
     max_dim = resolution_dimensions[res_lower]
 
+    _heavy_ffmpeg_allowed()
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
         raise RuntimeError("ffmpeg não está instalado na máquina do MCP (ex.: sudo apt install ffmpeg).")
