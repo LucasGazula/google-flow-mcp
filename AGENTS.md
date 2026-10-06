@@ -500,3 +500,8 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   `nice 19`); `flow_export_gif`, `flow_build_scene` e `flow_upscale` recusam antes de
   baixar e apontam as alternativas nativas (`flow_export_scene`, `flow_upscale_video`/
   `flow_upscale_image`). `flow_status` lista as indisponíveis. Suíte: 236 testes.
+- Login nativo na Pi (06/10/2026): sessões importadas do Windows caíram em ~1 dia;
+  login direto na Pi (`login-remoto.sh`, noVNC por HTTP na LAN) da ddv1 durou 16 h+.
+  As 9 contas foram relogadas assim. O script reabre o navegador (até 3 vezes) quando
+  o Flow abre antes de a sessão estar gravada. Não sobrescrever o script com uma janela
+  aberta (bash lê o arquivo enquanto roda); trocar com `mv`.
