@@ -451,3 +451,14 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   cookies a cada 5 s. Uma janela por conta. Perfis antigos `conta-b`/
   `conta-ponte-a` removidos da Pi. Cron `*/30` roda `keepalive.py` com log/estado
   em `/mnt/ssd/flow-mcp/logs/`. Sem gasto de créditos.
+- Mudanças do Flow (05/10/2026): catálogo com proporções repetidas/0 nas imagens;
+  Nano Banana 2 substituído por 2.1 (`beluga_display`, `nano-banana-2` aponta
+  para ele); mídias novas sem versão (versão 1 omitida); projeto vazio com listas
+  nulas. Corrigido em `e938689`. Teste entre contas: ddv1 gerou vídeo (10),
+  download + upload para ddv4 (aviso de direitos aprovado), ddv4 editou para
+  anime (20). Flow não tem projeto compartilhado entre contas.
+- Deploy contínuo (05/10/2026): `.github/workflows/deploy-pi.yml`. Push na `main`
+  roda a suíte no GitHub (Ubuntu + ffmpeg) e, se passar, o runner self-hosted
+  `banana-pi` (serviço systemd em `/mnt/ssd/flow-mcp/actions-runner`) faz rsync
+  para `/mnt/ssd/flow-mcp/app`, `uv sync --locked` e grava o commit em
+  `app/.deployed`. Perfis, logs e downloads ficam fora de `app/`.
