@@ -35,3 +35,7 @@ jobs:
         run: |
           source /mnt/ssd/flow-mcp/env.sh
           cd "$HOME_FLOW/app" && uv run --locked python -c "import flow_mcp" && git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD > "$HOME_FLOW/app/.deployed"
+      - name: Reiniciar o MCP HTTP
+        run: |
+          sudo -n systemctl restart flow-mcp
+          sleep 10 && systemctl is-active flow-mcp

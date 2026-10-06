@@ -152,6 +152,19 @@ class MCPSmokeTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ToolError):
                     await run_account_operation("status", "desconhecido@example.com")
 
+    async def test_http_app_requires_bearer_token(self) -> None:
+        from flow_mcp import http_app
+
+        app = http_app("segredo")
+        for headers in ([], [(b"authorization", b"Bearer errado")]):
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            await app({"type": "http", "headers": headers}, AsyncMock(), send)
+            self.assertEqual(sent[0]["status"], 401)
+
     def test_instructions_prompt_for_account_selection_before_spending_credits(self) -> None:
         self.assertIn("Antes de qualquer ferramenta que gaste créditos", INSTRUCTIONS)
         self.assertIn("Antes de qualquer ferramenta que gaste créditos", mcp.instructions)

@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
 import json
 import os
 from pathlib import Path
@@ -1033,5 +1034,27 @@ async def flow_complete_account_connection(account_id: str) -> dict[str, Any]:
     return await run_account_operation("import", account_id, payload)
 
 
+def http_app(token: str):
+    """Streamable HTTP para a rede local; exige `Authorization: Bearer <token>` (o MCP gasta créditos)."""
+    app = mcp.streamable_http_app(host="0.0.0.0")
+    expected = f"Bearer {token}".encode()
+
+    async def guarded(scope, receive, send):
+        if scope["type"] == "http" and not hmac.compare_digest(dict(scope["headers"]).get(b"authorization", b""), expected):
+            await send({"type": "http.response.start", "status": 401, "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"unauthorized"})
+            return
+        await app(scope, receive, send)
+
+    return guarded
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    if sys.argv[1:] == ["--http"]:
+        import uvicorn
+
+        # Sem token o servidor não sobe: nunca expor o MCP na rede sem autenticação.
+        uvicorn.run(http_app(os.environ["FLOW_MCP_HTTP_TOKEN"]), host="0.0.0.0",
+                    port=int(os.environ.get("FLOW_MCP_HTTP_PORT", "8765")))
+    else:
+        mcp.run(transport="stdio")

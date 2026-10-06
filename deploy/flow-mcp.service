@@ -1,0 +1,19 @@
+# MCP do Google Flow por HTTP na rede local (Banana Pi). Instalar uma vez:
+#   sudo cp deploy/flow-mcp.service /etc/systemd/system/ && sudo systemctl enable --now flow-mcp
+# O token fica em /mnt/ssd/flow-mcp/http.env (FLOW_MCP_HTTP_TOKEN=..., modo 600, fora do Git).
+# O deploy do GitHub Actions reinicia o serviço após publicar o código novo.
+[Unit]
+Description=Google Flow MCP (HTTP)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+User=pi
+EnvironmentFile=/mnt/ssd/flow-mcp/http.env
+ExecStart=/bin/bash -c 'source /mnt/ssd/flow-mcp/env.sh && cd "$HOME_FLOW/app" && exec uv run --locked python flow_mcp.py --http'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

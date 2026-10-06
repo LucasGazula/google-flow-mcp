@@ -462,3 +462,8 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   `banana-pi` (serviço systemd em `/mnt/ssd/flow-mcp/actions-runner`) faz rsync
   para `/mnt/ssd/flow-mcp/app`, `uv sync --locked` e grava o commit em
   `app/.deployed`. Perfis, logs e downloads ficam fora de `app/`.
+- MCP por HTTP na LAN (06/10/2026): `flow_mcp.py --http` serve streamable HTTP em
+  `0.0.0.0:8765/mcp`, exigindo `Authorization: Bearer` (`FLOW_MCP_HTTP_TOKEN`; sem
+  ele não sobe). Na Pi roda como serviço `flow-mcp` (`deploy/flow-mcp.service`,
+  token em `/mnt/ssd/flow-mcp/http.env`, modo 600); o deploy reinicia o serviço.
+  A Pi passa a ser o MCP principal; caminhos de arquivo das ferramentas são da Pi.
