@@ -1040,7 +1040,8 @@ def http_app(token: str):
     expected = f"Bearer {token}".encode()
 
     async def guarded(scope, receive, send):
-        if scope["type"] == "http" and not hmac.compare_digest(dict(scope["headers"]).get(b"authorization", b""), expected):
+        # A descoberta OAuth (/.well-known/) segue sem token e cai no 404: 401 ali faz clientes tentarem login OAuth.
+        if scope["type"] == "http" and not scope["path"].startswith("/.well-known/") and not hmac.compare_digest(dict(scope["headers"]).get(b"authorization", b""), expected):
             await send({"type": "http.response.start", "status": 401, "headers": [(b"content-type", b"text/plain")]})
             await send({"type": "http.response.body", "body": b"unauthorized"})
             return

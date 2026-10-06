@@ -162,7 +162,7 @@ class MCPSmokeTest(unittest.IsolatedAsyncioTestCase):
             async def send(message):
                 sent.append(message)
 
-            await app({"type": "http", "headers": headers}, AsyncMock(), send)
+            await app({"type": "http", "path": "/mcp", "headers": headers}, AsyncMock(), send)
             self.assertEqual(sent[0]["status"], 401)
 
     def test_instructions_prompt_for_account_selection_before_spending_credits(self) -> None:
