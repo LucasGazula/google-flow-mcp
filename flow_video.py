@@ -243,7 +243,7 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
     from gflow_cli.api.client import validate_image_file
     from flow_http import FlowHTTP
     from gflow_cli.api.transports.batchexecute import _walk_lists
-    from flow_assets import media_uuid, parse_assets, video_record
+    from flow_assets import media_uuid, parse_assets, payload_shape, video_record
     from gflow_cli.api.transports.migrated_recover import _verify
     from flow_requests import video_request
 
@@ -254,8 +254,9 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         raise ValueError("Informe um orçamento inteiro não negativo.")
     if project_id is not None:
         validate_project(project_id)
+    model = model.strip().lower().replace("_", "-") if isinstance(model, str) else model
     if model not in {"veo-lite", "veo-fast", "veo-quality", "omni-flash"}:
-        raise ValueError("Modelo inválido.")
+        raise ValueError("Modelo inválido; use veo-lite, veo-fast, veo-quality ou omni-flash.")
     if aspect not in {"16:9", "9:16"} or type(duration_seconds) is not int:
         raise ValueError("Proporção ou duração inválida.")
     if resolution not in {"360p", "720p", "1080p", "4k"}:
@@ -344,8 +345,6 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
            "end_image_asset_id": end_image_asset_id, "voice": voice, "character_ids": character_ids,
            "quoted_credits": None, "files": [], "media_ids": [], "workflow_ids": []}
     if quote_only:
-        if project_id is None:
-            raise ValueError("Cotação exige project_id.")
         job["quote_only"] = True
     save_job(job)
     if client is not None and client.account_id != account_id:
@@ -353,6 +352,13 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
     owned = client is None
     client = client or FlowHTTP(account_id)
     try:
+        if project_id is None and quote_only:
+            # O catálogo é lido no contexto de um projeto; cotar não cria projeto.
+            from flow_projects import parse_projects
+            projects = parse_projects(await client.rpc("UpteDb"))["projects"]
+            if not projects:
+                raise ValueError("Cotação exige ao menos um projeto na conta.")
+            project_id = projects[0]["project_id"]
         if project_id is None:
             created = await project_operation(account_id, "Google Flow MCP", client=client)
             job["project_id"] = created["project_id"]
@@ -478,11 +484,15 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
                 for media_id, previous in list(records.items()):
                     if previous.is_failed or (previous.is_done and previous.video_url):
                         continue
-                    record = video_record("as29s", await client.rpc("as29s", project_id=project_id,
-                        media_id=media_id, workflow_id=previous.workflow_id))
-                    if (record.media_id != media_id or record.workflow_id != previous.workflow_id
-                            or record.project_id != project_id):
-                        raise ValueError("Resposta de acompanhamento pertence a outra geração.")
+                    payload = await client.rpc("as29s", project_id=project_id,
+                        media_id=media_id, workflow_id=previous.workflow_id)
+                    try:
+                        record = video_record("as29s", payload, media_id)
+                        if record.workflow_id != previous.workflow_id or record.project_id != project_id:
+                            raise ValueError("Resposta de acompanhamento pertence a outra geração.")
+                    except ValueError:
+                        job["as29s_shape"] = payload_shape(payload)  # Sem IDs, textos ou URLs.
+                        raise
                     records[media_id] = record
                 if all(r.is_failed or (r.is_done and r.video_url) for r in records.values()):
                     break
@@ -688,7 +698,7 @@ async def recover_job(account_id: str, job_id: str, *, client=None) -> dict:
                             "headers":template["headers"]}, media_id)
                     try:
                         record = video_record("as29s", await client.rpc("as29s", project_id=job["project_id"],
-                                                                          media_id=media_id, workflow_id=workflow_id))
+                                                                          media_id=media_id, workflow_id=workflow_id), media_id)
                     except (ValueError, TypeError, IndexError):
                         continue
                     if (record.media_id != media_id or record.workflow_id != workflow_id
@@ -855,8 +865,11 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
         raise ValueError("Informe um orçamento inteiro não negativo.")
     if project_id is not None:
         validate_project(project_id)
-    if model not in {"nano-banana-2", "nano-banana-2-lite", "nano-pro"} or type(count) is not int:
-        raise ValueError("Modelo ou quantidade inválidos.")
+    model = model.strip().lower().replace("_", "-") if isinstance(model, str) else model
+    if model not in {"nano-banana-2", "nano-banana-2-lite", "nano-pro"}:
+        raise ValueError("Modelo inválido; use nano-banana-2, nano-banana-2-lite ou nano-pro.")
+    if type(count) is not int:
+        raise ValueError("Quantidade inválida.")
     if reference_asset_ids is not None and (type(reference_asset_ids) is not list
             or any(not isinstance(value, str) for value in reference_asset_ids)
             or len(set(reference_asset_ids)) != len(reference_asset_ids)):

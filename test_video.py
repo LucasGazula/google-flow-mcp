@@ -284,7 +284,7 @@ class VideoTest(unittest.IsolatedAsyncioTestCase):
             FlowHTTP,"send_submit",AsyncMock(side_effect=send)) as submit, patch.object(FlowHTTP,"status_from_submit"), patch.object(
             FlowHTTP,"rpc",AsyncMock(side_effect=poll)), patch.object(FlowHTTP,"download",AsyncMock(return_value=body)), patch.object(
             FlowHTTP,"close",AsyncMock()), patch("flow_video.asyncio.sleep",AsyncMock()), patch(
-            "flow_assets.video_record",side_effect=lambda rpc,row:submitted[ids.index(row[0])] if rpc=="YhhmEf" else row):
+            "flow_assets.video_record",side_effect=lambda rpc,row,*_:submitted[ids.index(row[0])] if rpc=="YhhmEf" else row):
             get_settings.cache_clear()
             try:
                 seeds=iter([("seed",v) for pair in zip(ids,workflows) for v in pair])

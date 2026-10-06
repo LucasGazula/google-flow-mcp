@@ -50,12 +50,20 @@ def media_revision(value: str | None) -> int:
     return revision
 
 
-def video_record(rpc, payload):
-    """O decoder fixado aceita só CAE; edições/extensões têm novas revisões."""
+def video_record(rpc, payload, media_id=None):
+    """O decoder fixado aceita só CAE; edições/extensões têm novas revisões.
+
+    Com media_id, considera só a linha dessa mídia: respostas podem aninhar
+    registros de quadros/referências com o mesmo formato.
+    """
     from gflow_cli.api.transports.batchexecute import generation_record, _walk_lists
 
     rows = [r for r in _walk_lists(payload) if len(r) >= 6
             and all(isinstance(r[i], str) for i in range(3)) and (r[3] is None or isinstance(r[3], str))]
+    if media_id is not None:
+        rows = [r for r in rows if _base_media_id(r[0]) == _base_media_id(media_id)]
+        if not rows:
+            raise ValueError("Mídia esperada ausente da resposta.")
     if not rows:
         return generation_record(rpc, payload)
     if len(rows) != 1:
@@ -73,6 +81,19 @@ def video_record(rpc, payload):
     # O frontend define nome da mídia no campo 1 e workflow no campo 3.
     # O decoder da release fixada inverte esses dois nomes para vídeos.
     return replace(record, media_id=media_id, workflow_id=row[2])
+
+
+def payload_shape(value, depth=0):
+    """Estrutura sem conteúdo (só tipos/tamanhos) para diagnosticar respostas novas."""
+    if isinstance(value, list):
+        return [payload_shape(v, depth + 1) for v in value[:12]] if depth < 8 else "list"
+    if isinstance(value, str):
+        try:
+            media_uuid(value)
+            return "uuid"
+        except ValueError:
+            return "url" if value.startswith("https://") else f"str{len(value)}"
+    return value if value is None or isinstance(value, (bool, int, float)) else type(value).__name__
 
 
 def image_download_url(payload, project_id, media_id):

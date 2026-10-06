@@ -257,7 +257,7 @@ async def flow_refine_video(account_id: str, project_id: str, media_id: str,
 
 
 @mcp.tool()
-async def flow_quote_video(account_id: str, project_id: str, operation: str = "generate",
+async def flow_quote_video(account_id: str, project_id: str | None = None, operation: str = "generate",
                            media_id: str | None = None, model: str = "veo-lite",
                            aspect: str = "16:9", duration_seconds: int = 8,
                            resolution: str = "720p", count: int = 1,
@@ -268,13 +268,14 @@ async def flow_quote_video(account_id: str, project_id: str, operation: str = "g
     """Cotar geração, edição ou extensão de vídeo pelo catálogo HTTP, sem enviar nem gastar.
 
     operation: generate, edit (Omni Flash, exige media_id) ou extend (exige media_id).
+    Sem project_id, usa o projeto mais recente da conta (edição/extensão exigem).
     Usa as mesmas validações do envio real e não cria tarefa. quoted_credits é o
     preço do catálogo para a combinação; credits_before é o saldo lido agora.
     """
     if operation not in {"generate", "edit", "extend"}:
         raise ToolError("Operação de cotação inválida.")
-    if operation != "generate" and not media_id:
-        raise ToolError("Edição/extensão exige media_id.")
+    if operation != "generate" and (not media_id or not project_id):
+        raise ToolError("Edição/extensão exige media_id e project_id.")
     payload = {"project_id":project_id, "model":"omni-flash" if operation == "edit" else model,
                "aspect":aspect, "duration_seconds":duration_seconds, "resolution":resolution,
                "count":count, "start_image_asset_id":start_image_asset_id,
@@ -623,7 +624,7 @@ async def flow_project_summary(account_id: str, project_id: str) -> dict[str, An
 
 
 @mcp.tool()
-async def flow_generate_images(account_id: str, prompt: str, max_credits: int,
+async def flow_generate_images(account_id: str, prompt: str, max_credits: int = 0,
                                project_id: str | None = None, model: str = "nano-banana-2",
                                aspect: str = "16:9", count: int = 1,
                                reference_images: list[str] | None = None,
@@ -688,7 +689,7 @@ async def flow_wait_job(account_id: str, job_id: str, timeout_seconds: int = 60,
             or type(poll_interval_seconds) is not int or not 2 <= poll_interval_seconds <= 60):
         raise ToolError("Use prazo inteiro de 0–600s e intervalo inteiro de 2–60s.")
     try:
-        validate_account(account_id)
+        account_id = resolve_account(account_id)
         job = get_job(account_id, job_id)
     except (ValueError, OSError) as exc:
         raise ToolError(str(exc)) from None

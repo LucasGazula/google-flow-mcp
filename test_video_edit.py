@@ -20,6 +20,20 @@ def video_row(project, media, workflow, revision="CAE", status=3, model="veo_3_1
 
 
 class VideoEditTest(unittest.IsolatedAsyncioTestCase):
+    def test_video_record_picks_expected_media_among_nested_rows(self):
+        from flow_assets import payload_shape
+
+        project, media, workflow, frame, frame_wf = (str(uuid4()) for _ in range(5))
+        # Quadro inicial aninhado com o mesmo formato de registro, antes da mídia.
+        payload = [[video_row(project, frame, frame_wf, revision=None)], video_row(project, media, workflow, revision=None)]
+        record = video_record("as29s", payload, media)
+        self.assertEqual((record.media_id, record.workflow_id), (media, workflow))
+        with self.assertRaises(ValueError):
+            video_record("as29s", payload, str(uuid4()))
+        shape = repr(payload_shape(payload))
+        self.assertNotIn(media, shape)
+        self.assertNotIn("https://", shape)
+
     async def test_separate_workflow_edit_persists_expected_ids_and_never_retries(self):
         from gflow_cli.config import get_settings
         project, source, workflow, output, new_workflow = (str(uuid4()) for _ in range(5))
@@ -358,24 +372,32 @@ class VideoEditTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 get_settings.cache_clear()
 
-    async def test_quote_only_without_project_id_fails_before_client_calls(self):
+    async def test_quote_only_without_project_id_uses_latest_project_without_creating(self):
         from gflow_cli.config import get_settings
 
+        latest, older = str(uuid4()), str(uuid4())
         client = SimpleNamespace(
             account_id="conta-a",
-            rpc=AsyncMock(),
+            rpc=AsyncMock(return_value=[[[latest, ["Recente"]], [older, ["Antigo"]]]]),
             prepare=AsyncMock(),
             send_submit=AsyncMock(),
         )
-        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"GFLOW_CLI_HOME": home}):
+        seen = []
+
+        async def quote(client, job, features):
+            seen.append(job["project_id"])
+            job["quoted_credits"] = 10
+            return {"model_key": "veo_lite", "quoted_credits": 10}
+
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"GFLOW_CLI_HOME": home}), \
+             patch("flow_video.generation_quote", side_effect=quote):
             get_settings.cache_clear()
             try:
-                with self.assertRaises(ValueError):
-                    await generate_video(
-                        "conta-a", "Gerar vídeo", 10,
-                        project_id=None, quote_only=True, client=client,
-                    )
-                client.rpc.assert_not_awaited()
+                job = await generate_video("conta-a", "Gerar vídeo", 10, project_id=None,
+                                           model="veo_lite", quote_only=True, client=client)
+                self.assertEqual((job["status"], job["project_id"], job["model"]), ("quoted", latest, "veo-lite"))
+                self.assertEqual(seen, [latest])
+                client.rpc.assert_awaited_once_with("UpteDb")
                 client.prepare.assert_not_awaited()
                 client.send_submit.assert_not_awaited()
             finally:
