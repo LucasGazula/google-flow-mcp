@@ -188,8 +188,8 @@ def parse_assets(payload, project_id: str, skipped: list | None = None) -> list[
 def _parse_asset_row(row, project_id, payload, character_refs):
     if not isinstance(row, list) or len(row) < 7 or row[1] != project_id:
         raise ValueError("Registro de mídia não reconhecido.")
-    if row[3] is None and (row[0] in character_refs or (payload[5] and isinstance(row[6], list))):
-        return None  # cópias internas de personagem (retrato/corpo): imagem sem versão
+    if row[0] in character_refs:
+        return None  # cópias internas de personagem (retrato/corpo/miniatura)
     revision = media_revision(row[3])
     info = row[6]
     dimensionless_upscale = (

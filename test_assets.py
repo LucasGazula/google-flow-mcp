@@ -230,10 +230,11 @@ class AssetTest(unittest.TestCase):
         normal_row = [normal_img, project, normal_wf, "CAE", None, [None] * 14, [None, None, [1024, 1024]]]
         char_copy_row = [char_ref_img, project, char_wf, None, None, [None] * 14, [None, None, [1024, 1024]]]
         char_row = [project, entity_id, None, [1, "Kai", [[[char_ref_img]]]], None, None]
-        payload_with_char = [None, [], [normal_row, char_copy_row], [], None, [char_row], None, []]
+        new_img = str(uuid4())  # mídia nova (sem versão) num projeto com personagem
+        new_row = [new_img, project, str(uuid4()), None, None, [None] * 14, [None, None, [1024, 1024]]]
+        payload_with_char = [None, [], [normal_row, char_copy_row, new_row], [], None, [char_row], None, []]
         assets = parse_assets(payload_with_char, project)
-        self.assertEqual(len(assets), 1)
-        self.assertEqual(assets[0]["media_id"], normal_img)
+        self.assertEqual([a["media_id"] for a in assets], [normal_img, new_img])
 
         # Desde 05/10/2026 o Flow omite a versão 1 em mídias novas.
         payload_without_char = [None, [], [normal_row, char_copy_row], [], None, [], None, []]
