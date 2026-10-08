@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import uuid
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -827,7 +828,8 @@ async def run_worker_operation(account_id, action, payload, env, root):
 
 
 async def _run_locked(account_id, action, payload, env, root):
-    request = json.dumps({"action": action, "payload": payload or {}}).encode() + b"\n"
+    request_id = uuid.uuid4().hex
+    request = json.dumps({"id": request_id, "action": action, "payload": payload or {}}).encode() + b"\n"
     process = _workers.get(account_id)
     for attempt in range(2):
         if process is None or process.returncode is not None:
@@ -843,11 +845,18 @@ async def _run_locked(account_id, action, payload, env, root):
             if attempt:
                 return {"status": "http_worker_error", "action": action,
                         "message": "Não foi possível iniciar o worker da conta; nada foi enviado ao Flow."}
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + worker_timeout(action, payload)
     try:
-        response = await asyncio.wait_for(process.stdout.readline(), worker_timeout(action, payload))
-        if not response:
-            raise EOFError
-        return json.loads(response)
+        while True:
+            response = await asyncio.wait_for(process.stdout.readline(), max(0, deadline - loop.time()))
+            if not response:
+                raise EOFError
+            result = json.loads(response)
+            # Resposta de uma chamada cancelada pelo cliente (recusa/timeout) fica no pipe; descartá-la
+            # evita entregá-la a este pedido. A tarefa dela continua persistida (flow_list_jobs).
+            if result.pop("request_id", request_id) == request_id:
+                return result
     except (asyncio.TimeoutError, EOFError, ValueError, OSError) as exc:
         await _stop_worker(account_id, process)
         reason = ("tempo esgotado" if isinstance(exc, asyncio.TimeoutError)
@@ -898,6 +907,8 @@ async def worker(account_id, input_stream, output_stream):
                 # Só mensagens escritas pelo MCP; respostas privadas do Flow são omitidas.
                 result = {"status": "http_error", "action": request.get("action") if isinstance(request, dict) else None,
                           **error_fields(exc)}
+            if isinstance(request, dict) and "id" in request and isinstance(result, dict):
+                result["request_id"] = request["id"]
             # default=str: um valor não serializável (ex.: Path) não pode derrubar o worker.
             output_stream.write(json.dumps(result, default=str) + "\n")
             output_stream.flush()

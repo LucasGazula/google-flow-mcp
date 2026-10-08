@@ -163,6 +163,25 @@ class WorkerErrorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(result["x"]), 200000)
 
+    async def test_stale_worker_response_of_cancelled_call_is_discarded(self):
+        import sys
+        import flow_http
+
+        real_exec = asyncio.create_subprocess_exec
+        script = ("import json,sys; r=json.loads(sys.stdin.readline()); "
+                  "print(json.dumps({'status':'stale','request_id':'antigo'})); "
+                  "print(json.dumps({'status':'ok','request_id':r['id']}), flush=True)")
+
+        async def fake_exec(*args, **kwargs):
+            return await real_exec(sys.executable, "-c", script, **kwargs)
+
+        with patch("asyncio.create_subprocess_exec", fake_exec):
+            try:
+                result = await flow_http.run_worker_operation("conta-defasada", "credits", {}, None, None)
+            finally:
+                await flow_http.close_workers()
+        self.assertEqual(result, {"status": "ok"})
+
     async def test_busy_account_answers_instead_of_hanging(self):
         import flow_http
 
