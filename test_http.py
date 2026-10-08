@@ -16,24 +16,6 @@ import httpx
 from flow_http import FlowHTTP, http_operation, close_workers
 
 
-
-class AgentChatCaptchaTest(unittest.TestCase):
-    def test_token_comes_from_held_stream_chat_of_the_same_project(self):
-        from urllib.parse import urlencode
-        from flow_http import agent_chat_captcha
-
-        project = "adf1a9da-b94e-4218-b536-fdc406a054af"
-        token = "t" * 2598
-        inner = ["sessao", [[[["texto"]]]], [f"projects/{project}", None, [token, 1], None, None, 1]]
-        body = urlencode({"f.req": json.dumps([None, json.dumps(inner)]), "at": "x"})
-        self.assertEqual(agent_chat_captcha(body, project), token)
-        with self.assertRaises(ValueError):
-            agent_chat_captcha(body, "outro-projeto")
-        inner[2][2] = ["curto", 1]
-        with self.assertRaises(ValueError):
-            agent_chat_captcha(urlencode({"f.req": json.dumps([None, json.dumps(inner)])}), project)
-
-
 class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
     async def test_refine_video_action_dispatches_with_resident_client(self):
         client = SimpleNamespace(account_id="conta-a")

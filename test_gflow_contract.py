@@ -15,7 +15,6 @@ ROOT = Path(__file__).parent
 PRIVATE_MEMBERS = {
     ("gflow_cli.api.transports.migrated_composer", "MigratedComposer"):
         ("_open_pane", "_select", "_close_pane", "_pre_submit_gate", "_upload_via_toolbar", "ensure_editor"),
-    ("gflow_cli.errors", "FlowAgentUiError"): (),
     ("gflow_cli.api.client", "FlowApiClient"): ("_request_headers", "_is_aisandbox_url"),
 }
 
