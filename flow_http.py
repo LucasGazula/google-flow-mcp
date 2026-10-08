@@ -270,6 +270,8 @@ class FlowHTTP:
                     # O frontend prepara o reCAPTCHA normal; nenhum pedido dele é enviado.
                     # Chamadas diretas a enterprise.execute são marcadas pelo próprio site.
                     composer = MigratedComposer()
+                    # Espera o compositor e sai do modo Agent (padrão em contas novas), como o gflow-cli faz.
+                    await composer.ensure_editor(page, project_id)
                     pane = await composer._open_pane(page)
                     try:
                         await composer._select(page, pane, axis="mode",

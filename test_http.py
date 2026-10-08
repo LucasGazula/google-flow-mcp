@@ -255,6 +255,7 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
         with patch("flow_browser.account_page",browser), patch.object(client,"session_from_page",AsyncMock()), patch.object(
                 client,"capture_submit",AsyncMock(side_effect=capture)) as captured, patch(
                 "gflow_cli.api.transports.migrated_composer.MigratedComposer._open_pane",AsyncMock()), patch(
+                "gflow_cli.api.transports.migrated_composer.MigratedComposer.ensure_editor",AsyncMock()) as editor, patch(
                 "gflow_cli.api.transports.migrated_composer.MigratedComposer._close_pane",AsyncMock()), patch(
                 "gflow_cli.api.transports.migrated_composer.MigratedComposer._select",AsyncMock()) as select, patch(
                 "gflow_cli.api.transports.migrated_composer.MigratedComposer._pre_submit_gate",AsyncMock()), patch(
@@ -268,6 +269,7 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(page.evaluate.await_count,1)
             self.assertEqual(captured.await_count,2)
             self.assertEqual([c.kwargs["axis"] for c in select.call_args_list],["mode","mode"])
+            self.assertEqual([c.args[1:] for c in editor.call_args_list],[(project,),(project,)])
             captured=client.request("ogiZ0b",[None,[],1])
             client.client=SimpleNamespace(post=AsyncMock(side_effect=post))
             frames.return_value=[("ogiZ0b",["accepted"])]
