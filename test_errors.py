@@ -163,6 +163,16 @@ class WorkerErrorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(result["x"]), 200000)
 
+    def test_gflow_ui_diagnosis_reaches_agent_without_urls(self):
+        from gflow_cli.errors import UiSelectorDriftError
+        from flow_errors import error_fields
+
+        exc = UiSelectorDriftError(detail="the account is in Flow's agent mode on https://flow.google.com/project/x?a=1")
+        fields = error_fields(exc)
+        self.assertEqual(fields["error_type"], "UiSelectorDriftError")
+        self.assertIn("agent mode", fields["error"])
+        self.assertNotIn("https://", fields["error"])
+
     async def test_stale_worker_response_of_cancelled_call_is_discarded(self):
         import sys
         import flow_http

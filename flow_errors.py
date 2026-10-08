@@ -16,6 +16,8 @@ _HERE = Path(__file__).resolve().parent
 _INPUT_VALIDATORS = {("api", "video.py"), ("api", "image.py")}
 _INPUT_FUNCTIONS = {"validate_image_file"}
 
+_UI_ERRORS = {"UiSelectorDriftError", "FlowAgentUiError"}
+
 _HINTS = {
     "TimeoutError": "Tempo esgotado esperando o Flow ou o navegador; confira o estado antes de repetir.",
     "ConnectError": "Sem conexão com o Flow; confira a rede antes de repetir.",
@@ -96,13 +98,18 @@ def error_fields(exc: BaseException, prefix: str = "") -> dict:
     if not safe and type(exc).__module__.startswith("playwright") and text:
         # Indica qual elemento da interface do Flow sumiu/mudou; URLs (podem ser assinadas) são removidas.
         safe, text = True, "Navegador: " + re.sub(r"https?://\S+", "<url>", text.splitlines()[0])[:300]
+    if not safe and type(exc).__name__ in _UI_ERRORS and getattr(exc, "detail", None):
+        # Diagnóstico do gflow-cli sobre a interface (modo Agent, seletor que mudou): só descreve a
+        # página, e é o que diz ao dono da conta o que fazer. URLs são removidas.
+        hint = getattr(exc, "remediation_hint", None) or ""
+        safe, text = True, re.sub(r"https?://\S+", "<url>", f"Interface do Flow: {exc.detail} Dica: {hint}")
     if origin is not None and origin.parent == _HERE and isinstance(exc, (IndexError, KeyError, TypeError,
                                                                          AttributeError)):
         # Falha inesperada no próprio código (formato novo do Flow ou bug): dica + onde olhar.
         fields[f"{prefix}error"] = f"{_HINTS.get(type(exc).__name__, 'Erro interno do MCP.')} [{text[:200]}]"
         fields[f"{prefix}error_location"] = f"{origin.name}:{frames[-1].lineno}"
     elif safe and text:
-        fields[f"{prefix}error"] = text[:500]
+        fields[f"{prefix}error"] = text[:900]
     elif type(exc).__name__ in _HINTS:
         fields[f"{prefix}error"] = _HINTS[type(exc).__name__]
     return fields
