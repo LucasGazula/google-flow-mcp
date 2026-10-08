@@ -269,9 +269,17 @@ class FlowHTTP:
 
                     # O frontend prepara o reCAPTCHA normal; nenhum pedido dele é enviado.
                     # Chamadas diretas a enterprise.execute são marcadas pelo próprio site.
+                    from gflow_cli.errors import FlowAgentUiError
+
                     composer = MigratedComposer()
                     # Espera o compositor e sai do modo Agent (padrão em contas novas), como o gflow-cli faz.
-                    await composer.ensure_editor(page, project_id)
+                    try:
+                        await composer.ensure_editor(page, project_id)
+                    except FlowAgentUiError:
+                        # O token do chat do Agent é recusado no envio direto (PUBLIC_ERROR_UNUSUAL_ACTIVITY).
+                        raise ValueError("Esta conta usa o compositor só de Agent (atribuído pelo Google); a geração "
+                                         "direta não é possível nela. Use outra conta ou flow_agent_request. "
+                                         "Nada foi enviado.") from None
                     pane = await composer._open_pane(page)
                     try:
                         await composer._select(page, pane, axis="mode",
