@@ -136,6 +136,42 @@ class FlowHTTP:
         await self.session_from_page(page)
         return captured
 
+    async def captcha_from_agent_chat(self, page, project_id):
+        """Conta com compositor só de Agent: o reCAPTCHA do Flow vai no StreamChat.
+
+        Digita um texto, retém e ABORTA o StreamChat (nada chega ao Agent) e qualquer RPC de
+        geração; a sessão do Agent (csbIsb) e as leituras seguem. O envio real continua sendo
+        o POST HTTP nativo de sempre.
+        """
+        from flow_agent import _GENERATION_RPCS
+
+        found = asyncio.get_running_loop().create_future()
+
+        async def hold(route):
+            request = route.request
+            body = (request.post_data_buffer or b"").decode("utf-8", "replace") if request.method == "POST" else ""
+            if "batchexecute" in request.url and any(rpc in body for rpc in _GENERATION_RPCS):
+                await route.abort()
+            elif request.method == "POST" and "FlowCreationAgentService/StreamChat" in request.url:
+                if not found.done():
+                    found.set_result(body)
+                await route.abort()
+            else:
+                await route.fallback()
+
+        await page.route("**/*", hold)
+        box = page.locator("div.ProseMirror >> visible=true").first
+        await box.click(timeout=30000)
+        await page.keyboard.type("Preparação MCP; envio bloqueado.")
+        await page.keyboard.press("Enter")
+        try:
+            body = await asyncio.wait_for(found, 60)
+        except asyncio.TimeoutError:
+            require_flow_page(page)
+            raise ValueError("O Agent não emitiu o pedido esperado em 60 s; nada foi enviado.") from None
+        await self.session_from_page(page)
+        return agent_chat_captcha(body, project_id)
+
     async def send_submit(self, captured):
         """Um único POST HTTP, sem retries nem recuperação por novo envio."""
         from gflow_cli.api.transports.batchexecute import parse_frames
@@ -269,9 +305,16 @@ class FlowHTTP:
 
                     # O frontend prepara o reCAPTCHA normal; nenhum pedido dele é enviado.
                     # Chamadas diretas a enterprise.execute são marcadas pelo próprio site.
+                    from gflow_cli.errors import FlowAgentUiError
+
                     composer = MigratedComposer()
                     # Espera o compositor e sai do modo Agent (padrão em contas novas), como o gflow-cli faz.
-                    await composer.ensure_editor(page, project_id)
+                    try:
+                        await composer.ensure_editor(page, project_id)
+                    except FlowAgentUiError:
+                        # Compositor só de Agent (atribuído pelo Google por conta): sem painel clássico.
+                        self.templates.pop("submission", None)
+                        return await self.captcha_from_agent_chat(page, project_id)
                     pane = await composer._open_pane(page)
                     try:
                         await composer._select(page, pane, axis="mode",
@@ -438,6 +481,21 @@ async def api_mutation_once(api, page, method: str, url: str, body: dict,
         return json.loads(text) if text else {}
     except Exception:
         return None
+
+
+def agent_chat_captcha(body, project_id):
+    """Token reCAPTCHA de um pedido StreamChat retido (compositor só de Agent).
+
+    O pedido leva [sessão, mensagem, ["projects/<id>", None, [token, 1], ...]].
+    """
+    inner = json.loads(json.loads(parse_qs(body, keep_blank_values=True)["f.req"][0])[1])
+    context = inner[2] if isinstance(inner, list) and len(inner) > 2 else None
+    if not (isinstance(context, list) and len(context) > 2 and context[0] == f"projects/{project_id}"):
+        raise ValueError("Projeto da autenticação do Agent não confirmado; nada foi enviado.")
+    token = context[2][0] if isinstance(context[2], list) and context[2] else None
+    if not isinstance(token, str) or len(token) < 100:
+        raise ValueError("Autenticação do Agent não encontrada; nada foi enviado.")
+    return token
 
 
 def validate_rpc_url(url):
