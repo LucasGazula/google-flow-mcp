@@ -300,3 +300,69 @@ class AgentRequestTest(unittest.IsolatedAsyncioTestCase):
             ])
 
 
+
+
+class AgentGenerationTest(unittest.IsolatedAsyncioTestCase):
+    PROJECT = "adf1a9da-b94e-4218-b536-fdc406a054af"
+
+    def held(self):
+        from urllib.parse import urlencode
+
+        inner = ["sessao-ui", [[[["Preparação"]]]], [f"projects/{self.PROJECT}", None, ["t" * 300, 1], None, None, 1]]
+        return urlencode({"f.req": json.dumps([None, json.dumps(inner)]), "at": "x"})
+
+    def inner(self, body):
+        from urllib.parse import parse_qs
+
+        return json.loads(json.loads(parse_qs(body)["f.req"][0])[1])
+
+    def test_chat_form_mentions_and_approval_match_the_interface(self):
+        from flow_agent import chat_form, mention
+
+        parts = [["Use "], mention("ent-1", "Palito", character=True), [" no "], mention("med-1", "feira", character=False)]
+        body, session = chat_form(self.held(), self.PROJECT, parts)
+        inner = self.inner(body)
+        self.assertEqual(session, "sessao-ui")
+        self.assertEqual(inner[1], [[[["Use "], [None, [None, None, ["ent-1", "Palito"]]], [" no "], [None, [["med-1", "feira"]]]]],
+                                    [["med-1", "feira"]], None, [["ent-1", "Palito"]]])
+        body, session = chat_form(self.held(), self.PROJECT, [], session_id="s2", approve=True)
+        inner = self.inner(body)
+        self.assertEqual((inner[0], inner[1], inner[2][5], inner[3:]), ("s2", [[[["Aprovar"]]]], 2, [None, 1]))
+        with self.assertRaises(ValueError):
+            chat_form(self.held(), "outro-projeto", [["x"]])
+
+    def test_agent_cost_reads_the_permission_question(self):
+        from flow_agent import agent_cost
+
+        self.assertEqual(agent_cost("Quer que eu inicie essa 1 geração de vídeo, que custa 4 créditos?"), 4)
+        self.assertEqual(agent_cost("This will cost 15 credits."), 15)
+        self.assertIsNone(agent_cost("Vou gerar as imagens."))
+
+    async def test_agent_generate_approves_only_the_quoted_cost_and_finds_new_media(self):
+        import flow_agent
+
+        listings = [[{"media_id": "old", "kind": "video", "workflow_id": "w0"}],
+                    [{"media_id": "old", "kind": "video", "workflow_id": "w0"}],
+                    [{"media_id": "old", "kind": "video", "workflow_id": "w0"},
+                     {"media_id": "new", "kind": "video", "workflow_id": "w1"}]]
+        client = SimpleNamespace(rpc=AsyncMock(side_effect=lambda *a, **k: listings.pop(0)))
+        chat = AsyncMock(side_effect=[{"session_id": "s", "answer": "Inicio? Custa 15 créditos.", "tools": []},
+                                      {"session_id": "s", "answer": "Gerando.", "tools": []}])
+        job, saved = {"project_id": self.PROJECT}, []
+        with patch.object(flow_agent, "agent_chat", chat), patch("flow_assets.parse_assets", lambda p, _: p), \
+                patch("asyncio.sleep", AsyncMock()):
+            found = await flow_agent.agent_generate(client, job, [["x"]], kind="video", count=1,
+                                                   expected_credits=15, save_job=saved.append)
+        self.assertEqual([a["media_id"] for a in found], ["new"])
+        self.assertTrue(chat.await_args_list[1].kwargs["approve"])
+        self.assertEqual(job["status"], "accepted")
+
+        chat = AsyncMock(return_value={"session_id": "s", "answer": "Custa 20 créditos.", "tools": []})
+        client = SimpleNamespace(rpc=AsyncMock(return_value=[]))
+        job = {"project_id": self.PROJECT}
+        with patch.object(flow_agent, "agent_chat", chat), patch("flow_assets.parse_assets", lambda p, _: p):
+            with self.assertRaisesRegex(ValueError, "nada foi aprovado"):
+                await flow_agent.agent_generate(client, job, [["x"]], kind="video", count=1,
+                                               expected_credits=15, save_job=lambda j: None)
+        chat.assert_awaited_once()  # sem aprovação
+        self.assertEqual(job["status"], "preparing")

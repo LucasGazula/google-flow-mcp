@@ -412,6 +412,139 @@ def parse_agent_stream(body: str) -> dict:
     return {"answer": answer.strip(), "tools": tools}
 
 
+async def chat_template(client, project_id: str, *, fresh_session: bool) -> dict:
+    """Pedido StreamChat digitado na página e retido (abortado): url, corpo com reCAPTCHA novo e cabeçalhos.
+
+    Nada chega ao Agent; RPCs de geração são abortados; a sessão (csbIsb) e as leituras seguem.
+    """
+    import asyncio
+    from urllib.parse import urlsplit
+
+    found = asyncio.get_running_loop().create_future()
+    async with client.browser.page() as page:
+        async def hold(route):
+            request = route.request
+            body = (request.post_data_buffer or b"").decode("utf-8", "replace") if request.method == "POST" else ""
+            if "batchexecute" in request.url and any(rpc in body for rpc in _GENERATION_RPCS):
+                await route.abort()
+                return
+            if request.method == "POST" and "FlowCreationAgentService/StreamChat" in request.url:
+                if not found.done():
+                    found.set_result({"url":request.url, "body":body,
+                        "headers":{key:value for key, value in request.headers.items()
+                                   if key.lower() not in {"cookie", "host", "content-length", "connection"}}})
+                await route.abort()
+            else:
+                await route.fallback()
+        await page.route("**/*", hold)
+        await page.goto(f"https://flow.google.com/project/{project_id}", wait_until="domcontentloaded", timeout=45000)
+        toggle = page.get_by_role("button", name=re.compile("^Agente$|^Agent$"))
+        if await toggle.count() and await toggle.first.get_attribute("aria-pressed") != "true":
+            raise ValueError("Página não abriu no modo Agente; nada foi digitado.")
+        if fresh_session:
+            # Painel aberto reabre a última sessão; sem o botão, o envio já cria sessão nova.
+            try:
+                await page.get_by_role("button", name=re.compile("^Iniciar nova sessão$|^Start new session$")).first.click(timeout=5000)
+            except Exception:
+                pass
+        # Só a caixa visível: no compositor só de Agent há outra editável oculta.
+        box = page.locator("[contenteditable=true] >> visible=true").first
+        await box.click(timeout=30000)
+        await page.keyboard.type("Preparação MCP; envio bloqueado.")
+        await page.keyboard.press("Enter")
+        captured = await asyncio.wait_for(found, 60)
+        await client.session_from_page(page)
+    if urlsplit(captured["url"]).hostname != "flow.google.com":
+        raise ValueError("Destino do Agent não reconhecido.")
+    return captured
+
+
+def mention(item_id: str, name: str, *, character: bool) -> list:
+    """Trecho de mensagem que cita um personagem (entidade) ou uma mídia do projeto, como o @ da interface."""
+    return [None, [None, None, [item_id, name]]] if character else [None, [[item_id, name]]]
+
+
+def chat_form(body: str, project_id: str, parts: list, *, session_id: str | None = None,
+              approve: bool = False) -> tuple[str, str]:
+    """Troca a mensagem de um StreamChat retido; `approve` vira a resposta "Aprovar" ao pedido de permissão."""
+    from urllib.parse import parse_qs, urlencode
+
+    form = parse_qs(body, keep_blank_values=True)
+    inner = json.loads(json.loads(form["f.req"][0])[1])
+    if (not isinstance(inner, list) or len(inner) < 3 or not isinstance(inner[2], list)
+            or inner[2][0] != f"projects/{project_id}" or len(inner[2]) < 6):
+        raise ValueError("Pedido do Agent não confirmado; envio bloqueado.")
+    # Continuação: o pedido retido usa a sessão aberta no painel; troca-se pela pedida.
+    session_id = session_id or inner[0]
+    inner[0] = session_id
+    media = [part[1][0] for part in parts if part[0] is None and part[1][0] is not None]
+    entities = [part[1][2] for part in parts if part[0] is None and part[1][0] is None]
+    inner[1] = [[parts]] + ([media or None, None, entities or None] if media or entities else [])
+    if approve:
+        inner[1] = [[[["Aprovar"]]]]
+        inner[2][5] = 2  # resposta de permissão, como o clique em "Aprovar"
+        inner[3:] = [None, 1]
+    form["f.req"] = [json.dumps([None, json.dumps(inner, separators=(",", ":"), ensure_ascii=False)],
+                                separators=(",", ":"), ensure_ascii=False)]
+    return urlencode(form, doseq=True), session_id
+
+
+async def agent_chat(client, project_id: str, parts: list, *, session_id: str | None = None,
+                     approve: bool = False) -> dict:
+    """Uma mensagem ao Agent por um único POST StreamChat (reCAPTCHA novo a cada mensagem)."""
+    captured = await chat_template(client, project_id, fresh_session=session_id is None)
+    body, session_id = chat_form(captured["body"], project_id, parts, session_id=session_id, approve=approve)
+    response = await client.client.post(captured["url"], content=body, headers=captured["headers"], timeout=600)
+    if response.status_code != 200:
+        raise ValueError("Resposta do Agent inconclusiva; não reenviar.")
+    return {"session_id": session_id, **parse_agent_stream(response.text)}
+
+
+def agent_cost(answer: str) -> int | None:
+    """Créditos do pedido de aprovação do Agent ("... que custa 4 créditos?")."""
+    found = re.search(r"(\d+)\s*(?:créditos?|credits?)\b", answer or "", re.I)
+    return int(found.group(1)) if found else None
+
+
+async def agent_generate(client, job: dict, parts: list, *, kind: str, count: int, expected_credits: int,
+                         save_job, timeout: int = 600) -> list[dict]:
+    """Geração pelo Agent (conta só de Agent): pede, confere o custo informado, aprova e acha a mídia nova.
+
+    Só aprova se o Agent informar exatamente `expected_credits`. Sem pedido de aprovação com custo
+    (Agent configurado para não confirmar), o resultado é incerto e não deve ser repetido.
+    """
+    import asyncio
+    from flow_assets import parse_assets
+
+    project_id = job["project_id"]
+    listed = lambda payload: parse_assets(payload, project_id)
+    before = {a["media_id"] for a in listed(await client.rpc("Zzl0ze", project_id=project_id))}
+    job.update(status="submitting", source="Agent/StreamChat")
+    save_job(job)  # Com "Confirmar antes de gerar: Nunca", o Agent já gastaria aqui.
+    first = await agent_chat(client, project_id, parts)
+    job.update(agent_session_id=first["session_id"], agent_answer=first["answer"][:600])
+    asked = agent_cost(first["answer"])
+    if expected_credits and asked is None:
+        raise ValueError("O Agent não pediu aprovação com o custo; ele pode ter gerado sem confirmar. Confira o "
+                         "projeto antes de repetir (não reenvie).")
+    if expected_credits:
+        job["agent_quoted_credits"] = asked
+        if asked != expected_credits:
+            job["status"] = "preparing"  # Nada aprovado: o pedido fica sem efeito no Agent.
+            raise ValueError(f"O Agent cotou {asked} créditos, diferente da cotação ({expected_credits}); "
+                             "nada foi aprovado.")
+        await agent_chat(client, project_id, [], session_id=first["session_id"], approve=True)
+    job["status"] = "accepted"
+    save_job(job)
+    async with asyncio.timeout(timeout):
+        while True:
+            new = [a for a in listed(await client.rpc("Zzl0ze", project_id=project_id))
+                   if a["media_id"] not in before and a["kind"] == kind]
+            if len(new) >= count:
+                return new[:count]
+            await asyncio.sleep(5)
+
+
 async def agent_request(account_id: str, project_id: str, message: str, *,
                         allow_media_changes: bool = False, session_id: str | None = None,
                         client=None) -> dict:
@@ -454,60 +587,12 @@ async def agent_request(account_id: str, project_id: str, message: str, *,
                 raise ValueError("Modo Agente não ativado; nada foi enviado.")
             job["agent_mode_restore"] = True
             save_job(job)
-        found = asyncio.get_running_loop().create_future()
-        async with client.browser.page() as page:
-            async def hold(route):
-                # StreamChat é retido e qualquer geração é abortada; sessão (csbIsb) e leituras seguem.
-                request = route.request
-                body = (request.post_data_buffer or b"").decode("utf-8", "replace") if request.method == "POST" else ""
-                if "batchexecute" in request.url and any(rpc in body for rpc in _GENERATION_RPCS):
-                    job["blocked_generation"] = True
-                    await route.abort()
-                    return
-                if request.method == "POST" and "FlowCreationAgentService/StreamChat" in request.url:
-                    if not found.done():
-                        found.set_result({"url":request.url, "body":request.post_data_buffer.decode(),
-                            "headers":{key:value for key, value in request.headers.items()
-                                       if key.lower() not in {"cookie", "host", "content-length", "connection"}}})
-                    await route.abort()
-                else:
-                    await route.fallback()
-            await page.route("**/*", hold)
-            await page.goto(f"https://flow.google.com/project/{project_id}",
-                            wait_until="domcontentloaded", timeout=45000)
-            toggle = page.get_by_role("button", name=re.compile("^Agente$|^Agent$"))
-            if await toggle.count() and await toggle.first.get_attribute("aria-pressed") != "true":
-                raise ValueError("Página não abriu no modo Agente; nada foi digitado.")
-            # Painel aberto reabre a última sessão; sem painel, o envio já cria sessão nova.
-            fresh = page.get_by_role("button", name=re.compile("^Iniciar nova sessão$|^Start new session$"))
-            if session_id is None:
-                try:
-                    await fresh.first.click(timeout=5000)
-                except Exception:
-                    if await fresh.count():
-                        raise
-            box = page.locator("[contenteditable=true]").first
-            await box.click(timeout=30000)
-            await page.keyboard.type("Preparação MCP; envio bloqueado.")
-            await page.keyboard.press("Enter")
-            captured = await asyncio.wait_for(found, 60)
-            await client.session_from_page(page)
-        if urlsplit(captured["url"]).hostname != "flow.google.com":
-            raise ValueError("Destino do Agent não reconhecido.")
-        form = parse_qs(captured["body"], keep_blank_values=True)
-        inner = json.loads(json.loads(form["f.req"][0])[1])
-        if (not isinstance(inner, list) or len(inner) < 3 or not isinstance(inner[2], list)
-                or inner[2][0] != f"projects/{project_id}"):
-            raise ValueError("Pedido do Agent não confirmado; envio bloqueado.")
-        # Continuação: o pedido retido usa a sessão aberta no painel; troca-se pela pedida.
-        session_id = session_id or inner[0]
-        inner[0] = session_id
-        inner[1] = [[[[text]]]]
-        form["f.req"] = [json.dumps([None, json.dumps(inner, separators=(",", ":"), ensure_ascii=False)],
-                                    separators=(",", ":"), ensure_ascii=False)]
+        captured = await chat_template(client, project_id, fresh_session=session_id is None)
+        body, session_id = chat_form(captured["body"], project_id, [[text]], session_id=session_id)
+        captured["body"] = body
         job.update(status="submitting", session_id=session_id)
         save_job(job)
-        response = await client.client.post(captured["url"], content=urlencode(form, doseq=True),
+        response = await client.client.post(captured["url"], content=captured["body"],
                                              headers=captured["headers"], timeout=300)
         if response.status_code != 200:
             raise ValueError("Resposta do Agent inconclusiva; não reenviar.")

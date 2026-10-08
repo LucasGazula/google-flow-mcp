@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import re
 from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from types import SimpleNamespace
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from gflow_cli.api.transports.migrated_composer import MigratedComposer
 from flow_browser import account_page
@@ -63,6 +64,11 @@ def job_path(job_id: str) -> Path:
 VIDEO_MODELS = ("veo-lite", "veo-fast", "veo-quality", "omni-flash")
 IMAGE_MODELS = ("nano-banana-2", "nano-banana-2-lite", "nano-pro")
 _MODEL_ALIASES = {"nano-banana-pro": "nano-pro", "omni": "omni-flash"}
+
+
+# Nome do modelo no pedido em texto ao Agent (contas só de Agent).
+AGENT_MODEL_NAMES = {"omni-flash": "Omni Flash", "veo-lite": "Veo 3.1 Lite", "veo-fast": "Veo 3.1 Fast",
+                     "veo-quality": "Veo 3.1 Quality"}
 
 
 def normalize_model(model, allowed) -> str:
@@ -285,6 +291,8 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
     from flow_assets import MediaAbsent, media_uuid, parse_assets, payload_shape, video_record
     from gflow_cli.api.transports.migrated_recover import _verify
     from flow_requests import video_request
+    from flow_http import AgentOnlyComposer
+    from flow_agent import agent_generate, mention
 
     validate_account(account_id)
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
@@ -407,12 +415,14 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
             project_id = created["project_id"]
         job["project_id"] = project_id
         features = [1, 5, 7] if has_end_frame else [1, 5] if has_start_frame else [1, 6] if has_refs else [1]
-        existing_refs = []
+        existing_refs, agent_characters = [], []
         if character_ids:
             from flow_character import parse_characters
 
-            known = {c["entity_id"] for c in parse_characters(
+            listed = {c["entity_id"]: c for c in parse_characters(
                 await client.rpc("Zzl0ze", project_id=project_id), project_id)}
+            agent_characters = [listed[c] for c in character_ids if c in listed]
+            known = set(listed)
             if not set(character_ids) <= known:
                 raise ValueError("Personagem ausente deste projeto/conta.")
         if reference_asset_ids or frame_asset_ids:
@@ -479,45 +489,84 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         if quote_only:
             job["status"] = "quoted"
             return job
-        uploaded = await prepare_reference_uploads(job, (*[p for p in (start, end) if p is not None], *refs), client=client)
-        captcha = await client.prepare("Zzl0ze", project_id=project_id, captcha_action="VIDEO_GENERATION")
-        quote = await generation_quote(client, job, features)
-        start_id = start_image_asset_id or (uploaded[0]["media_id"] if start else None)
-        end_upload_index = int(start is not None)
-        end_id = end_image_asset_id or (uploaded[end_upload_index]["media_id"] if end else None)
-        all_refs = [*existing_refs, *uploaded]
-        reference_ids = [u["media_id"] for u in all_refs] if has_refs else []
-        packet = video_request(project_id, prompt, quote["model_key"], aspect, count, captcha,
-                               start_id=start_id, end_id=end_id, references=reference_ids,
-                               reference_names={u["media_id"]:u["name"] for u in all_refs},
-                               operation=operation, source_id=source_media_id, workflow_id=workflow_id,
-                               start_frame=first_frame, end_frame=last_frame, voice=voice,
-                               characters=character_ids or (),
-                               create_new_workflow=create_new_workflow)
-        rpc = packet["rpc_id"]
-        captured = client.request(rpc, packet["params"])
-        job.update(request_media_ids=packet["request_media_ids"], request_workflow_ids=packet["request_workflow_ids"])
-        job.update(status="submitting", source=f"HTTP/{rpc}")
-        save_job(job)  # O navegador não gerou; somente este POST pode cobrar.
-        payload = await client.send_submit(captured)
-        records = {}
-        for row in _walk_lists(payload):
-            # Versão (campo 3) vem nula em mídias novas desde 05/10/2026.
-            if (len(row) < 6 or not all(isinstance(row[i], str) for i in range(3))
-                    or not (row[3] is None or isinstance(row[3], str))):
-                continue
-            record = video_record(rpc, row)
-            expected = dict(zip(job["request_media_ids"], job["request_workflow_ids"]))
-            if (record.project_id != project_id or expected.get(record.media_id) != record.workflow_id
-                    or record.media_id in records):
-                raise ValueError("Resposta da geração pertence a outro pedido/projeto.")
-            records[record.media_id] = record
-        if not records:
-            raise ValueError("Identificadores da geração não confirmados.")
-        job.update(status="accepted", media_ids=list(records), workflow_ids=[r.workflow_id for r in records.values()],
-                   media_id=next(iter(records)), workflow_id=next(iter(records.values())).workflow_id)
-        save_job(job)
-        client.status_from_submit(captured, job["media_id"])
+        try:
+            agent_only = False
+            uploaded = await prepare_reference_uploads(job, (*[p for p in (start, end) if p is not None], *refs), client=client)
+            captcha = await client.prepare("Zzl0ze", project_id=project_id, captcha_action="VIDEO_GENERATION")
+        except AgentOnlyComposer:
+            agent_only = True
+        if agent_only:
+            # Conta só de Agent: o Agent gera no servidor; o MCP confere o custo antes de aprovar.
+            if operation != "generate" or start or end or refs or start_image_asset_id or end_image_asset_id:
+                raise AgentOnlyComposer("Conta só de Agent: o MCP gera nela apenas vídeo novo com personagens e "
+                                        "imagens do projeto como referência (sem quadros inicial/final nem "
+                                        "arquivos locais). Nada foi enviado.")
+            quote = await generation_quote(client, job, features)
+            parts = [[f"Gere {count} vídeo{'s' if count > 1 else ''} com o modelo {AGENT_MODEL_NAMES[model]}, "
+                      f"{duration_seconds} segundos, {resolution}, proporção {aspect}"]]
+            mentions = [mention(c["entity_id"], c["display_name"], character=True) for c in agent_characters] + \
+                       [mention(a["media_id"], a["name"] or "imagem", character=False) for a in existing_refs]
+            if mentions:
+                parts.append([", usando como referência "])
+                for k, item in enumerate(mentions):
+                    parts += ([[", "]] if k else []) + [item]
+            if voice:
+                parts.append([f", com a voz {voice}"])
+            parts.append([f". Use exatamente este comando, sem reescrever, resumir nem traduzir: \"{prompt}\". "
+                          "Peça minha aprovação antes de gerar."])
+            found = await agent_generate(client, job, parts, kind="video", count=count,
+                                         expected_credits=job["quoted_credits"], save_job=save_job)
+            job.update(request_media_ids=[a["media_id"] for a in found],
+                       request_workflow_ids=[a["workflow_id"] for a in found])
+            template = client.templates["Zzl0ze"]
+            captured = {"url": template["url"], "body": urlencode(template["form"], doseq=True),
+                        "headers": template["headers"]}
+            # Estado inicial "em andamento"; o acompanhamento as29s abaixo lê o estado real.
+            records = {a["media_id"]: SimpleNamespace(media_id=a["media_id"], workflow_id=a["workflow_id"],
+                                                      is_failed=False, is_done=False, video_url=None)
+                       for a in found}
+            job.update(media_ids=list(records), workflow_ids=[r.workflow_id for r in records.values()],
+                       media_id=found[0]["media_id"], workflow_id=found[0]["workflow_id"])
+            save_job(job)
+            client.status_from_submit(captured, job["media_id"])
+        else:
+            quote = await generation_quote(client, job, features)
+            start_id = start_image_asset_id or (uploaded[0]["media_id"] if start else None)
+            end_upload_index = int(start is not None)
+            end_id = end_image_asset_id or (uploaded[end_upload_index]["media_id"] if end else None)
+            all_refs = [*existing_refs, *uploaded]
+            reference_ids = [u["media_id"] for u in all_refs] if has_refs else []
+            packet = video_request(project_id, prompt, quote["model_key"], aspect, count, captcha,
+                                   start_id=start_id, end_id=end_id, references=reference_ids,
+                                   reference_names={u["media_id"]:u["name"] for u in all_refs},
+                                   operation=operation, source_id=source_media_id, workflow_id=workflow_id,
+                                   start_frame=first_frame, end_frame=last_frame, voice=voice,
+                                   characters=character_ids or (),
+                                   create_new_workflow=create_new_workflow)
+            rpc = packet["rpc_id"]
+            captured = client.request(rpc, packet["params"])
+            job.update(request_media_ids=packet["request_media_ids"], request_workflow_ids=packet["request_workflow_ids"])
+            job.update(status="submitting", source=f"HTTP/{rpc}")
+            save_job(job)  # O navegador não gerou; somente este POST pode cobrar.
+            payload = await client.send_submit(captured)
+            records = {}
+            for row in _walk_lists(payload):
+                # Versão (campo 3) vem nula em mídias novas desde 05/10/2026.
+                if (len(row) < 6 or not all(isinstance(row[i], str) for i in range(3))
+                        or not (row[3] is None or isinstance(row[3], str))):
+                    continue
+                record = video_record(rpc, row)
+                expected = dict(zip(job["request_media_ids"], job["request_workflow_ids"]))
+                if (record.project_id != project_id or expected.get(record.media_id) != record.workflow_id
+                        or record.media_id in records):
+                    raise ValueError("Resposta da geração pertence a outro pedido/projeto.")
+                records[record.media_id] = record
+            if not records:
+                raise ValueError("Identificadores da geração não confirmados.")
+            job.update(status="accepted", media_ids=list(records), workflow_ids=[r.workflow_id for r in records.values()],
+                       media_id=next(iter(records)), workflow_id=next(iter(records.values())).workflow_id)
+            save_job(job)
+            client.status_from_submit(captured, job["media_id"])
         misses = {}
         try:
             async with asyncio.timeout(600):

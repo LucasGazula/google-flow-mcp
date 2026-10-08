@@ -17,6 +17,10 @@ SESSION_LOST = ("A conta não está autenticada no Flow (redirecionada para o lo
                 "de apresentação); refaça o login da conta antes de continuar.")
 
 
+class AgentOnlyComposer(ValueError):
+    """Conta com compositor só de Agent (atribuído pelo Google): sem envio direto; gerar via Agent."""
+
+
 def require_flow_page(page):
     """Erro claro quando o Google redireciona para login em vez de abrir o Flow.
 
@@ -277,9 +281,8 @@ class FlowHTTP:
                         await composer.ensure_editor(page, project_id)
                     except FlowAgentUiError:
                         # O token do chat do Agent é recusado no envio direto (PUBLIC_ERROR_UNUSUAL_ACTIVITY).
-                        raise ValueError("Esta conta usa o compositor só de Agent (atribuído pelo Google); a geração "
-                                         "direta não é possível nela. Use outra conta ou flow_agent_request. "
-                                         "Nada foi enviado.") from None
+                        raise AgentOnlyComposer("Esta conta usa o compositor só de Agent (atribuído pelo Google); a "
+                                                "geração direta não é possível nela. Nada foi enviado.") from None
                     pane = await composer._open_pane(page)
                     try:
                         await composer._select(page, pane, axis="mode",
