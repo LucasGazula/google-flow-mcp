@@ -952,6 +952,10 @@ async def worker(account_id, input_stream, output_stream):
 
 
 if __name__ == "__main__":
+    # O worker roda do módulo importado: como __main__, suas classes (ex.: AgentOnlyComposer) seriam
+    # cópias distintas das que flow_video/flow_edit importam, e os `except` delas não as pegariam.
+    import flow_http
+
     original_output = sys.stdout
     with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
-        asyncio.run(worker(sys.argv[2], sys.stdin, original_output))
+        asyncio.run(flow_http.worker(sys.argv[2], sys.stdin, original_output))
