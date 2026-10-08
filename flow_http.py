@@ -29,14 +29,18 @@ async def prepare_generation(client, project_id, captcha_action):
     """
     try:
         return await client.prepare("Zzl0ze", project_id=project_id, captcha_action=captcha_action)
-    except AgentOnlyComposer:
+    except AgentOnlyComposer as first:
         from flow_settings import update_user_settings
 
         for enabled in (True, False):
-            if (await update_user_settings(client.account_id, agent_mode_enabled=enabled,
-                                           client=client)).get("status") != "updated":
-                raise
-        return await client.prepare("Zzl0ze", project_id=project_id, captcha_action=captcha_action)
+            result = await update_user_settings(client.account_id, agent_mode_enabled=enabled, client=client)
+            if result.get("status") != "updated":
+                raise AgentOnlyComposer(f"{first} A troca do modo Agent ({enabled}) não foi confirmada: "
+                                        f"{result.get('status')} {result.get('message') or ''}".strip()) from None
+        try:
+            return await client.prepare("Zzl0ze", project_id=project_id, captcha_action=captcha_action)
+        except AgentOnlyComposer as second:
+            raise AgentOnlyComposer(f"{second} (persistiu após ligar e desligar o modo Agent)") from None
 
 
 def require_flow_page(page):
