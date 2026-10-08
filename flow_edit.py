@@ -102,7 +102,7 @@ async def edit_image(account_id: str, project_id: str, media_id: str, prompt: st
     from flow_accounts import validate_account
     from gflow_cli.api.image import Model, Aspect
     from flow_requests import image_request
-    from flow_http import FlowHTTP
+    from flow_http import FlowHTTP, prepare_generation
     from flow_annotations import validate_annotations, upload_annotated_image
     from flow_assets import image_download_url
     from flow_video import prepare_reference_uploads
@@ -177,7 +177,7 @@ async def edit_image(account_id: str, project_id: str, media_id: str, prompt: st
                 raise ValueError("Upload da anotação inconclusivo; edição não enviada.")
             base_id = annotated["media_id"]
         uploaded = await prepare_reference_uploads(job, refs, client=client)
-        captcha = await client.prepare("Zzl0ze", project_id=project_id, captcha_action="IMAGE_GENERATION")
+        captcha = await prepare_generation(client, project_id, "IMAGE_GENERATION")
         quote = await generation_quote(client, job, [1, 4])
         packet = image_request(project_id, prompt, quote["model_key"], aspect, count, captcha,
                                source_media_id=base_id, workflow_id=workflow_id,

@@ -786,3 +786,21 @@ class DispatchCoverageTest(unittest.TestCase):
         actions = set(re.findall(r'run_account_operation\("([a-z_]+)"', tools)) - {"list", "job", "jobs"}
         dispatch = inspect.getsource(flow_http)  # http_operation e laço do worker (connect/import)
         self.assertEqual(sorted(a for a in actions if f'"{a}"' not in dispatch), [])
+
+
+class PrepareGenerationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_only_composer_is_reset_by_toggling_agent_mode_once(self):
+        from unittest.mock import AsyncMock, patch
+        from types import SimpleNamespace
+        from flow_http import AgentOnlyComposer, prepare_generation
+
+        client = SimpleNamespace(account_id="conta-a", prepare=AsyncMock(side_effect=[AgentOnlyComposer("só Agent"), "token"]))
+        update = AsyncMock(return_value={"status": "updated"})
+        with patch("flow_settings.update_user_settings", update):
+            self.assertEqual(await prepare_generation(client, "projeto", "VIDEO_GENERATION"), "token")
+        self.assertEqual([c.kwargs["agent_mode_enabled"] for c in update.await_args_list], [True, False])
+        self.assertEqual(client.prepare.await_count, 2)
+
+        client.prepare = AsyncMock(side_effect=AgentOnlyComposer("só Agent"))
+        with patch("flow_settings.update_user_settings", update), self.assertRaises(AgentOnlyComposer):
+            await prepare_generation(client, "projeto", "IMAGE_GENERATION")

@@ -21,6 +21,24 @@ class AgentOnlyComposer(ValueError):
     """Conta com compositor só de Agent (atribuído pelo Google): sem envio direto; gerar via Agent."""
 
 
+async def prepare_generation(client, project_id, captcha_action):
+    """Preparo de geração; no compositor só de Agent, liga e desliga o modo Agent e tenta uma vez mais.
+
+    Ligar e desligar `agent_mode_enabled` devolve o compositor clássico (validado em ddv2 e
+    ddv3, 08/10/2026). Se persistir, AgentOnlyComposer segue para o chamador.
+    """
+    try:
+        return await client.prepare("Zzl0ze", project_id=project_id, captcha_action=captcha_action)
+    except AgentOnlyComposer:
+        from flow_settings import update_user_settings
+
+        for enabled in (True, False):
+            if (await update_user_settings(client.account_id, agent_mode_enabled=enabled,
+                                           client=client)).get("status") != "updated":
+                raise
+        return await client.prepare("Zzl0ze", project_id=project_id, captcha_action=captcha_action)
+
+
 def require_flow_page(page):
     """Erro claro quando o Google redireciona para login em vez de abrir o Flow.
 

@@ -291,7 +291,7 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
     from flow_assets import MediaAbsent, media_uuid, parse_assets, payload_shape, video_record
     from gflow_cli.api.transports.migrated_recover import _verify
     from flow_requests import video_request
-    from flow_http import AgentOnlyComposer
+    from flow_http import AgentOnlyComposer, prepare_generation
     from flow_agent import agent_generate, mention
 
     validate_account(account_id)
@@ -492,7 +492,7 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         try:
             agent_only = False
             uploaded = await prepare_reference_uploads(job, (*[p for p in (start, end) if p is not None], *refs), client=client)
-            captcha = await client.prepare("Zzl0ze", project_id=project_id, captcha_action="VIDEO_GENERATION")
+            captcha = await prepare_generation(client, project_id, "VIDEO_GENERATION")
         except AgentOnlyComposer:
             agent_only = True
         if agent_only:
@@ -980,7 +980,7 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
     from flow_accounts import validate_account
     from gflow_cli.api.image import GenerateImageRequest, ImageRef, Model, Aspect
     from flow_projects import project_operation
-    from flow_http import FlowHTTP
+    from flow_http import FlowHTTP, prepare_generation
     from flow_assets import media_uuid, parse_assets
     from gflow_cli.api.transports.batchexecute import image_records
     from flow_requests import image_request
@@ -1051,7 +1051,7 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
         features = [1, 4] if refs or existing_refs else [1]
         await generation_quote(client, job, features)
         uploaded = await prepare_reference_uploads(job, refs, client=client)
-        captcha = await client.prepare("Zzl0ze", project_id=project_id, captcha_action="IMAGE_GENERATION")
+        captcha = await prepare_generation(client, project_id, "IMAGE_GENERATION")
         quote = await generation_quote(client, job, features)
         packet = image_request(project_id, prompt, quote["model_key"], aspect, count, captcha,
                                references=[r["media_id"] for r in existing_refs + uploaded],
