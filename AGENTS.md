@@ -510,3 +510,12 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   cena nativa exportada em MP4 30 s. Corrigido `parse_assets`: mídias sem versão
   em projeto com personagem eram ocultadas (listagem vazia, `reference_asset_ids`
   recusado); cópias agora só por IDs do personagem (`64d220a`, validado na Pi).
+- Compositor só de Agent (08/10/2026): contas que nunca usaram o compositor clássico
+  (ddv2, ddv3, ddv6, ddv7) abriam o Flow só com o Agent (`FlowAgentUiError`) e não
+  geravam. Ligar e desligar `agent_mode_enabled` devolve o clássico de vez;
+  `flow_http.prepare_generation` faz isso sozinho antes de desistir. O worker passou a
+  rodar do módulo importado (como `__main__`, suas exceções não batiam com os `except`
+  dos chamadores). Fallback de vídeo via Agent (`flow_agent.agent_generate`): aprova
+  só se o custo informado pelo Agent for igual à cotação. Reaproveitar o reCAPTCHA do
+  StreamChat num POST direto dá `PUBLIC_ERROR_UNUSUAL_ACTIVITY`; não repetir. As 7
+  contas ativas geram. Suíte: 242 testes. Gasto de teste: 4 créditos (ddv2).
