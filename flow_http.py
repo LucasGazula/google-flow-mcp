@@ -24,8 +24,8 @@ class AgentOnlyComposer(ValueError):
 async def prepare_generation(client, project_id, captcha_action):
     """Preparo de geração; no compositor só de Agent, liga e desliga o modo Agent e tenta uma vez mais.
 
-    Ligar e desligar `agent_mode_enabled` devolve o compositor clássico (validado em ddv2 e
-    ddv3, 08/10/2026). Se persistir, AgentOnlyComposer segue para o chamador.
+    Ligar e desligar `agent_mode_enabled` devolve o compositor clássico (validado em 08/10/2026).
+    Se persistir, AgentOnlyComposer segue para o chamador.
     """
     try:
         return await client.prepare("Zzl0ze", project_id=project_id, captcha_action=captcha_action)

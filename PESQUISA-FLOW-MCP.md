@@ -6,9 +6,9 @@ Data: 2026-09-29. Verificação documental e leitura de código público; nenhum
 
 ## Objetivo confirmado
 
-Um agente ou a automação local do usuário deve criar vídeos no Google Flow usando os créditos da própria conta, acompanhar o processamento, baixar o resultado e entregá-lo ao fork [LucasGazula/MoneyPrinterTurbo](https://github.com/LucasGazula/MoneyPrinterTurbo). O plano informado é **Google AI Pro**. Geração de imagens é secundária. O projeto roda localmente; MCP local é uma opção adequada. As respostas desta sessão devem ser em português do Brasil. O usuário pediu registro no AI Memory, com workspace/project `google_flow_mcp`; a gravação nessa memória é tratada pelo agente principal.
+Um agente ou a automação local do usuário deve criar vídeos no Google Flow usando os créditos da própria conta, acompanhar o processamento, baixar o resultado e entregá-lo ao fork de MoneyPrinterTurbo. O plano informado é **Google AI Pro**. Geração de imagens é secundária. O projeto roda localmente; MCP local é uma opção adequada. As respostas desta sessão devem ser em português do Brasil. O usuário pediu registro no AI Memory, com workspace/project `google_flow_mcp`; a gravação nessa memória é tratada pelo agente principal.
 
-Pendências para implementação: cliente/agente MCP; acesso efetivo da conta ao Flow; navegador e fronteira Windows/WSL; interface da conta (compositor clássico ou somente agente); regra de autorização e limite de gasto por execução. O agente principal localizou um clone do fork em `/home/lucas/orca/workspaces/MoneyPrinterTurbo/migration`, com muitas alterações preexistentes; elas devem ser preservadas.
+Pendências para implementação: cliente/agente MCP; acesso efetivo da conta ao Flow; navegador e fronteira Windows/WSL; interface da conta (compositor clássico ou somente agente); regra de autorização e limite de gasto por execução. O agente principal localizou um clone do fork em diretório de trabalho dedicado com muitas alterações preexistentes; elas devem ser preservadas.
 
 ## Resultado
 

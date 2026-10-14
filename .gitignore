@@ -1,3 +1,4 @@
+# Ambientes e pacotes Python
 .venv/
 .venv-windows/
 __pycache__/
@@ -5,9 +6,18 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Variáveis de ambiente e segredos
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.cert
+*.crt
+id_rsa*
+id_ed25519*
+
 # Sessões, credenciais e arquivos gerados ficam fora do Git.
 profiles/
 secrets/
@@ -18,8 +28,50 @@ cookies*.json
 *.log
 logs/
 keepalive-state.*
+keepalive-state.json
+keepalive-state.lock
+
 # Sondagens locais de validação não fazem parte do servidor.
 .probe_*.py
 .validate_*.py
-keepalive-state.json
-keepalive-state.lock
+
+# Arquivos de mídia, prévias e áudios locais
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.srt
+*.vtt
+narracao-*
+*-texto.txt
+*-previa*
+*-celular*
+
+# Diretórios temporários e de execução
+tmp/
+temp/
+cache/
+actions-runner/
+*.tmp
+*.bak
+*.swp
+*~
+
+# Sistema operacional e editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

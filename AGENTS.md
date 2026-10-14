@@ -43,8 +43,8 @@ Documentação: `PLANO-MCP.md` (requisitos), `docs/IMPLEMENTACAO-FLOW.md` (regis
 detalhado e gastos), `docs/AUTENTICACAO-PORTABILIDADE.md`, `README.md`.
 
 Ambientes: Windows (`.venv-windows`, onde o MCP está registrado no Claude Code,
-Antigravity e Codex), WSL (testes) e Banana Pi `pi@192.168.0.52` (chave
-`~/.ssh/id_ed25519_win`, tudo em `/mnt/ssd/flow-mcp/`; carregar `env.sh`).
+Antigravity e Codex), WSL (testes) e Banana Pi (servidor local dedicado,
+tudo em `/mnt/ssd/flow-mcp/`; carregar `env.sh`).
 Perfis em `profiles/profile_<conta>` (Windows) e `/mnt/ssd/flow-mcp/home` (Pi).
 
 ## Histórico (mais antigo → mais recente)
@@ -207,8 +207,8 @@ quando o grafo não fornecer resultados suficientes.
 
 Chamar `index_repository` somente para um repositório Git explicitamente
 selecionado, com sua raiz exata. Nunca indexar raízes de discos ou diretórios
-pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
-`C:\\Users\\Lucas` e `$HOME`. Sem repositório Git, não indexar.
+pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/<usuario>`,
+`C:\\Users\\<usuario>` e `$HOME`. Sem repositório Git, não indexar.
 <!-- codebase-memory-mcp:end -->
 
 - Sessões do Agent (01/10/2026): criação e renomeação confirmadas no Windows
@@ -444,9 +444,8 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   `keepalive.py` ganhou trava, pausa com jitter, estado persistente, `needs_login`
   após 2 falhas e fingerprint da rotação do cookie. Objetivo: 9 contas na Pi.
   Andamento em AI Memory `projeto/em-andamento.md`.
-- 9 contas na Pi (05/10/2026): ddv1–4, ddv6–9 (`lucashenriqueddvN@gmail.com`) e
-  `checkpointsecret`, cada uma com login limpo; saldo HTTP confirmado em todas.
-  Nome do perfil = prefixo do e-mail. Conta que nunca abriu o Flow mostra popup
+- 9 contas na Pi (05/10/2026): contas configuradas com login limpo; saldo HTTP confirmado em todas.
+  Nome do perfil = prefixo do identificador da conta. Conta que nunca abriu o Flow mostra popup
   de primeiro acesso e o saldo fica `unavailable` até aceitá-lo (aceite é da
   conta); `login_para_pi.py` deixa a janela 1 min após o Flow carregar e relê os
   cookies a cada 5 s. Uma janela por conta. Perfis antigos `conta-b`/
@@ -519,3 +518,7 @@ pessoais, incluindo `/`, `/mnt/c`, `C:\\`, `/mnt/c/Users/Lucas`,
   só se o custo informado pelo Agent for igual à cotação. Reaproveitar o reCAPTCHA do
   StreamChat num POST direto dá `PUBLIC_ERROR_UNUSUAL_ACTIVITY`; não repetir. As 7
   contas ativas geram. Suíte: 242 testes. Gasto de teste: 4 créditos (ddv2).
+- Contas removidas (09/10/2026): o Google derrubou contas inativas; a
+  pedido do usuário os perfis foram apagados da Pi (`home/profile_*`) e as entradas
+  saíram de `logs/keepalive-state.json`. Restam as contas ativas, todas `authenticated`.
+  Não relogar as contas removidas. Sem gasto de créditos.

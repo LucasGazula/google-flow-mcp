@@ -1429,7 +1429,7 @@ pendentes; "Criar retrato/corpo" geram mídia e não foram usados.
   sem Banana Pi (glibc). Contabilizados 426/700.
 
 - Deploy na Banana Pi (05/10/2026): Banana Pi M5, Ubuntu 20.04 aarch64, kernel 4.9,
-  `pi@192.168.0.52` (chave `id_ed25519_win`). Tudo no SSD em `/mnt/ssd/flow-mcp/`
+  servidor local dedicado. Tudo no SSD em `/mnt/ssd/flow-mcp/`
   (`app/` código da main via `git archive`, `venv/`, `python/`, `cache/`, `browsers/`,
   `home/` perfis, `env.sh`, `run-mcp.sh`); o cartão SD tem ~680 MB livres, não usar.
   `uv` 0.12 + Python 3.11 e Chromium 149 do Playwright (glibc 2.25 ok); apt: libs
@@ -1445,7 +1445,7 @@ pendentes; "Criar retrato/corpo" geram mídia e não foram usados.
   `.gflow_account` gravado manualmente. MCP via SSH: `/mnt/ssd/flow-mcp/run-mcp.sh`,
   64 ferramentas. Sem gasto de créditos neste deploy; estabilidade prolongada e
   durabilidade da sessão (Google pode revogar cookies em outro dispositivo) pendentes.
-- Repositório (05/10/2026): GitHub privado `LucasGazula/google-flow-mcp` (main);
+- Repositório (05/10/2026): GitHub privado (main);
   experimento Lightpanda na branch `experimento/lightpanda`. Servidor registrado como
   `google-flow` no Claude Code (escopo usuário), Antigravity CLI e Codex, executando
   no Windows via `powershell.exe` (`.venv-windows`).
