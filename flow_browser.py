@@ -1,6 +1,55 @@
 """Chrome dedicado, residente no worker, com lease e páginas de preparo descartáveis."""
 
+import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
+import fcntl
+import os
+from pathlib import Path
+import tempfile
+
+# Páginas leves (padrão): o preparo só precisa do JavaScript do Flow e do reCAPTCHA. Imagens, vídeos e fontes
+# (miniaturas do projeto) são bloqueados: na Pi eram o grosso da memória. FLOW_MCP_LIGHT_PAGES=0 desliga.
+LIGHT_PAGES = os.environ.get("FLOW_MCP_LIGHT_PAGES", "1") != "0"
+HEAVY_TYPES = {"image", "media", "font"}
+# Quantas páginas de preparo podem carregar ao mesmo tempo na máquina, somando todas as contas (cada conta é um
+# processo). As demais esperam a vez em vez de levar a Pi ao swap. ponytail: fila por arquivo + polling de 0,5 s.
+PREPARE_SLOTS = max(1, int(os.environ.get("FLOW_MCP_PREPARE_SLOTS", "2")))
+SLOT_WAIT_SECONDS = 300
+
+
+async def _skip_heavy(route):
+    request = route.request
+    if request.resource_type in HEAVY_TYPES and "/recaptcha/" not in request.url:
+        await route.abort()
+    else:
+        await route.fallback()
+
+
+@asynccontextmanager
+async def prepare_slot(folder=None):
+    """Uma das PREPARE_SLOTS vagas da máquina (flock em <tmp>/flow-mcp-prepare-slots/N.lock), liberada ao sair."""
+    folder = folder or Path(tempfile.gettempdir()) / "flow-mcp-prepare-slots"
+    folder.mkdir(exist_ok=True)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + SLOT_WAIT_SECONDS
+    while True:
+        for k in range(PREPARE_SLOTS):
+            handle = open(folder / f"{k}.lock", "a")
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                continue
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                handle.close()
+            return
+        if loop.time() > deadline:
+            raise ValueError(f"Máquina do MCP ocupada: {PREPARE_SLOTS} preparos de outras contas em andamento "
+                             f"há mais de {SLOT_WAIT_SECONDS} s; nada foi enviado. Tente de novo em instantes.")
+        await asyncio.sleep(0.5)
 
 
 class FlowBrowser:
@@ -20,6 +69,12 @@ class FlowBrowser:
 
     @asynccontextmanager
     async def page(self):
+        async with prepare_slot():
+            async with self._page() as page:
+                yield page
+
+    @asynccontextmanager
+    async def _page(self):
         if self.context is None:
             from flow_accounts import validate_account
             from gflow_cli import auth
@@ -48,6 +103,8 @@ class FlowBrowser:
                 kwargs.update(executable_path=executable, service_workers="block")
                 self.context = await pw.chromium.launch_persistent_context(**kwargs)
                 self.stack.push_async_callback(self.context.close)
+                if LIGHT_PAGES and self.headless:
+                    await self.context.route("**/*", _skip_heavy)
                 for page in self.context.pages:
                     await page.close()
             except BaseException:

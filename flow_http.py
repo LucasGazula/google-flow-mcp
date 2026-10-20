@@ -945,8 +945,9 @@ async def _run_locked(account_id, action, payload, env, root):
                 "message": f"Worker da conta sem resposta ({reason}) e reiniciado; não houve reenvio automático."}
 
 
-# Chrome ocioso é fechado (libera memória e o lease do perfil); o próximo pedido o reabre.
-WORKER_IDLE_SECONDS = float(os.environ.get("FLOW_MCP_WORKER_IDLE_SECONDS", "900"))
+# Chrome ocioso é fechado (libera memória e o lease do perfil); o próximo pedido o reabre. 3 min mantém um lote
+# quente e devolve a memória da Pi para as outras contas (antes 15 min).
+WORKER_IDLE_SECONDS = float(os.environ.get("FLOW_MCP_WORKER_IDLE_SECONDS", "180"))
 
 
 async def worker(account_id, input_stream, output_stream):

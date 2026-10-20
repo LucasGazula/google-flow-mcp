@@ -196,10 +196,15 @@ cookies rotacionados, o worker recopia a sessão do Chrome e repete a leitura um
 vez; mutações nunca são repetidas. Página redirecionada para o login gera erro
 pedindo novo login da conta.
 
-Cada conta usa um worker com Chrome headless residente. Após 15 minutos sem
+Cada conta usa um worker com Chrome headless residente. Após 3 minutos sem
 pedidos (`FLOW_MCP_WORKER_IDLE_SECONDS`), o Chrome é fechado, liberando memória e
 o perfil para o keepalive; o próximo pedido o reabre em alguns segundos. Uma
 confirmação de upload pendente mantém o Chrome aberto.
+
+Para caber várias contas na Pi, as páginas de preparo headless não baixam imagens,
+vídeos nem fontes (`FLOW_MCP_LIGHT_PAGES=0` desliga) e no máximo
+`FLOW_MCP_PREPARE_SLOTS` (padrão 2) páginas carregam ao mesmo tempo somando todas
+as contas; as outras esperam a vez (até 5 min, sem enviar nada).
 
 ## Gerar um vídeo com orçamento
 

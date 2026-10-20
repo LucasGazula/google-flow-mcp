@@ -13,7 +13,7 @@ from flow_browser import FlowBrowser
 class BrowserTest(unittest.IsolatedAsyncioTestCase):
     async def test_headless_context_survives_pages_and_releases_profile_on_shutdown_or_launch_failure(self):
         pages = [SimpleNamespace(close=AsyncMock()) for _ in range(2)]
-        context = SimpleNamespace(pages=[], new_page=AsyncMock(side_effect=pages), close=AsyncMock())
+        context = SimpleNamespace(pages=[], new_page=AsyncMock(side_effect=pages), close=AsyncMock(), route=AsyncMock())
         launch = AsyncMock(return_value=context)
         playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
         leases = []
@@ -66,3 +66,26 @@ class BrowserTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrepareSlotTest(unittest.IsolatedAsyncioTestCase):
+    async def test_slots_limit_concurrent_prepares_across_accounts(self):
+        import asyncio
+        import flow_browser
+
+        with tempfile.TemporaryDirectory() as root, patch.object(flow_browser, "PREPARE_SLOTS", 1):
+            order = []
+
+            async def prepare(name):
+                async with flow_browser.prepare_slot(Path(root)):
+                    order.append(f"{name}+")
+                    await asyncio.sleep(0.6)
+                    order.append(f"{name}-")
+
+            await asyncio.gather(prepare("a"), prepare("b"))
+            self.assertIn(order, (["a+", "a-", "b+", "b-"], ["b+", "b-", "a+", "a-"]))
+            with patch.object(flow_browser, "SLOT_WAIT_SECONDS", 0):
+                async with flow_browser.prepare_slot(Path(root)):
+                    with self.assertRaises(ValueError):
+                        async with flow_browser.prepare_slot(Path(root)):
+                            pass
