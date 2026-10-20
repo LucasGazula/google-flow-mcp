@@ -21,6 +21,46 @@ class AgentOnlyComposer(ValueError):
     """Conta com compositor só de Agent (atribuído pelo Google): sem envio direto; gerar via Agent."""
 
 
+class SubmitRejected(ValueError):
+    """O Flow respondeu ao envio com um quadro de erro explícito: nada foi gerado nem cobrado."""
+
+
+def submit_rejection(text, rpc_id):
+    """Códigos do quadro de erro de `rpc_id` (`wrb.fr` com payload nulo) ou de um quadro `er`, ou None.
+
+    Só números e nomes de enum (ex.: PUBLIC_ERROR_UNUSUAL_ACTIVITY) saem daqui; nada de texto livre ou URL.
+    """
+    import re
+
+    found = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("["):
+            continue
+        try:
+            chunk = json.loads(line)
+        except ValueError:
+            continue
+        for item in chunk if isinstance(chunk, list) else ():
+            if not isinstance(item, list) or len(item) < 3:
+                continue
+            if (item[0] == "wrb.fr" and item[1] == rpc_id and item[2] is None) or item[0] == "er":
+                found = item[3:]
+    if found is None:
+        return None
+    codes = []
+
+    def walk(x):
+        if isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, int) and not isinstance(x, bool) or isinstance(x, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,80}", x):
+            if x not in codes:
+                codes.append(x)
+    walk(found)
+    return codes[:8]
+
+
 async def prepare_generation(client, project_id, captcha_action):
     """Preparo de geração; no compositor só de Agent, liga e desliga o modo Agent e tenta uma vez mais.
 
@@ -173,6 +213,10 @@ class FlowHTTP:
             raise ValueError(f"Envio HTTP inconclusivo (HTTP {response.status_code}); não reenviar automaticamente.")
         frames = [payload for rpc, payload in parse_frames(response.text) if rpc == captured["rpc_id"]]
         if len(frames) != 1 or frames[0] is None:
+            codes = submit_rejection(response.text, captured["rpc_id"]) if not frames else None
+            if codes is not None:
+                raise SubmitRejected(f"O Flow recusou o envio ({captured['rpc_id']}; códigos: "
+                                     f"{', '.join(map(str, codes)) or 'nenhum'}). Nada foi gerado.")
             raise ValueError("Resposta do envio HTTP não reconhecida.")
         return frames[0]
 

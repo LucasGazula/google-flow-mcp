@@ -616,9 +616,12 @@ async def generate_video(account_id: str, prompt: str, max_credits: int,
         job["status"] = "completed" if len(job["files"]) == count else "partial_result" if job["files"] else "generation_failed"
         await record_charge(client, job)
     except Exception as exc:
+        from flow_http import SubmitRejected
+
         job.update(error_fields(exc))
         job["failure_stage"] = job["status"]
-        job["status"] = {"preparing": "failed_pre_submit", "submitting": "submission_unknown",
+        job["status"] = {"preparing": "failed_pre_submit", "submitting": "generation_failed" if isinstance(
+                             exc, SubmitRejected) else "submission_unknown",
                          "accepted": "generation_unknown", "downloading": "download_failed"}.get(job["status"], job["status"])
         # error_fields omite mensagens/URLs do backend; geração incerta não é reenviada.
     finally:
@@ -1084,9 +1087,12 @@ async def generate_images(account_id: str, prompt: str, max_credits: int,
         job["status"] = "completed" if len(images) == count else "partial_result"
         await record_charge(client, job)
     except Exception as exc:
+        from flow_http import SubmitRejected
+
         job.update(error_fields(exc))
         job["failure_stage"] = job["status"]
-        job["status"] = {"preparing": "failed_pre_submit", "submitting": "submission_unknown",
+        job["status"] = {"preparing": "failed_pre_submit", "submitting": "generation_failed" if isinstance(
+                             exc, SubmitRejected) else "submission_unknown",
                          "downloading": "download_failed"}.get(job["status"], job["status"])
     finally:
         if owned:

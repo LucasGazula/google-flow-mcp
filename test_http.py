@@ -161,6 +161,22 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
                                        [[None] * 6 + [True], ["has_sound_on_tile_hover"]])
         client.client.post.assert_awaited_once_with(request["url"], content="encoded", headers={})
 
+    async def test_submit_error_frame_is_rejection_and_unknown_body_stays_uncertain(self):
+        from flow_http import SubmitRejected
+        client = FlowHTTP("conta-a")
+        captured = {"url": "https://flow.google.com/_/Ui/data/batchexecute?rpcids=eb1hJf", "body": "x",
+                    "headers": {}, "rpc_id": "eb1hJf"}
+        erro = ')]}\'\n123\n' + json.dumps([["wrb.fr", "eb1hJf", None, None, None,
+                                               [8, None, [["type.googleapis.com/x", ["PUBLIC_ERROR_QUOTA",
+                                                "texto livre https://x"]]]], "generic"]])
+        for text, kind, msg in ((erro, SubmitRejected, "8, PUBLIC_ERROR_QUOTA"), ("<html>", ValueError, "não reconhecida")):
+            client.client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200, text=text)))
+            with self.assertRaises(kind) as ctx:
+                await client.send_submit(captured)
+            self.assertIn(msg, str(ctx.exception))
+            self.assertNotIn("http", str(ctx.exception))
+            self.assertEqual(kind is SubmitRejected, isinstance(ctx.exception, SubmitRejected))
+
     async def test_agent_session_rpc_ids_use_explicit_parameter_allowlist(self):
         client = FlowHTTP("conta-a")
         client.templates["UpteDb"] = {
