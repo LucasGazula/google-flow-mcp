@@ -63,6 +63,50 @@ class BrowserTest(unittest.IsolatedAsyncioTestCase):
                         self.fail("Navegador não iniciou")
                 self.assertEqual(leases, ["enter", "exit", "enter", "exit"])
 
+    async def test_chrome_without_pages_closes_after_idle_and_reopens_on_demand(self):
+        import asyncio
+        import flow_browser
+
+        contexts = []
+
+        async def launch(**kwargs):
+            contexts.append(SimpleNamespace(pages=[], route=AsyncMock(), close=AsyncMock(),
+                                            new_page=AsyncMock(return_value=SimpleNamespace(close=AsyncMock()))))
+            return contexts[-1]
+
+        @asynccontextmanager
+        async def lease(path=None):
+            yield
+
+        @asynccontextmanager
+        async def start_playwright():
+            yield SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
+
+        with tempfile.TemporaryDirectory() as root:
+            profile = Path(root) / "profile_conta-a"
+            profile.mkdir()
+            with patch("gflow_cli.auth.profile_dir", return_value=profile), patch(
+                    "gflow_cli.config.get_settings", return_value=SimpleNamespace(home=Path(root))), patch(
+                    "gflow_cli.browser_manager.resolved_chrome_binary", return_value="chrome"), patch(
+                    "gflow_cli.profile_lease.ProfileLease", lease), patch(
+                    "playwright.async_api.async_playwright", start_playwright), patch.object(
+                    flow_browser, "IDLE_CLOSE_SECONDS", 0.05), patch.object(flow_browser, "prepare_slot", lease):
+                browser = FlowBrowser("conta-a")
+                async with browser.page():
+                    await asyncio.sleep(0.1)  # Página aberta: não fecha.
+                contexts[0].close.assert_not_awaited()
+                await asyncio.sleep(0.1)
+                contexts[0].close.assert_awaited_once()
+                self.assertIsNone(browser.context)
+                async with browser.page():
+                    pass
+                async with browser.page():  # Reabrir antes do prazo cancela o fechamento.
+                    await asyncio.sleep(0.1)
+                self.assertEqual(len(contexts), 2)
+                contexts[1].close.assert_not_awaited()
+                await browser.close()
+                contexts[1].close.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

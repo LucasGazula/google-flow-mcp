@@ -5,7 +5,8 @@ entre contas do Google e estado persistente. Como o Google não informa quando i
 registra também um fingerprint do cookie de renovação para provar se ele realmente rotaciona.
 
 Uso (cron):  python keepalive.py [--log CAMINHO] [--state CAMINHO]
-Sai com 1 se alguma conta não estiver 'ok' (perfil ocupado por outro worker conta como 'busy').
+Sai com 1 se alguma conta não estiver 'ok' (perfil ocupado por outro worker conta como 'busy'; conta com
+geração/upload do MCP nos últimos 30 min não é aberta e conta como 'in_use').
 """
 import argparse, asyncio, fcntl, hashlib, json, os, random, time
 from datetime import datetime, timezone
@@ -14,6 +15,29 @@ from pathlib import Path
 MAX_LINES = 1000  # ponytail: log aparado por contagem de linhas; trocar por logrotate se crescer
 NEEDS_LOGIN_AFTER = 2  # falhas seguidas antes de declarar needs_login (evita alarme por falha de rede)
 PAUSE_S = 30  # base da pausa entre contas, mais jitter de 0 a PAUSE_S
+# Conta que o MCP usou com sucesso nesse intervalo (geração/upload: preparo no Chrome do perfil) já teve a sessão
+# exercitada e renovada; checá-la de novo só abriria mais um Chrome disputando CPU com a produção na Pi.
+RECENT_USE_S = 1800
+PROVEN_STATUSES = {"completed", "uploaded"}
+
+
+def recently_used(log: Path, now: float) -> set[str]:
+    """Contas com geração/upload concluído pelo MCP nos últimos RECENT_USE_S (lê só o fim do log)."""
+    try:
+        with open(log, "rb") as stream:
+            stream.seek(max(0, stream.seek(0, 2) - 500_000))
+            lines = stream.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return set()
+    used = set()
+    for line in lines:
+        try:
+            r = json.loads(line)
+            if r["status"] in PROVEN_STATUSES and now - datetime.fromisoformat(r["at"]).timestamp() < RECENT_USE_S:
+                used.add(r["account_id"])
+        except (ValueError, KeyError, TypeError):
+            continue  # Linha cortada no início da leitura ou de outro formato.
+    return used
 
 
 def accounts(root: Path) -> list[str]:
@@ -57,6 +81,8 @@ def update_state(state: dict, r: dict) -> dict:
         if r["rotation_fp"] and s["last_fp"] and r["rotation_fp"] != s["last_fp"]:
             s["rotations"] += 1
         s["last_fp"] = r["rotation_fp"] or s["last_fp"]
+    elif r["status"] == "in_use":
+        s["failures"] = 0  # Geração/upload concluído pelo MCP prova a sessão.
     elif r["status"] != "busy":
         s["failures"] += 1
     s["needs_login"] = s["failures"] >= NEEDS_LOGIN_AFTER
@@ -76,11 +102,16 @@ async def main(log: Path, state_path: Path) -> int:
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
         state = {}  # Estado ausente ou corrompido (ex.: queda do SSD) não impede a checagem.
-    results = []
-    for i, account in enumerate(accounts(root)):
-        if i:
-            await asyncio.sleep(PAUSE_S + random.uniform(0, PAUSE_S))
-        r = await check(account)
+    results, checked = [], False
+    used = recently_used(Path(os.environ.get("FLOW_MCP_LOG") or root.parent / "logs" / "operations.jsonl"), time.time())
+    for account in accounts(root):
+        if account in used:
+            r = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "account_id": account,
+                 "seconds": 0, "rotation_fp": None, "status": "in_use"}
+        else:
+            if checked:
+                await asyncio.sleep(PAUSE_S + random.uniform(0, PAUSE_S))
+            r, checked = await check(account), True
         r["needs_login"] = update_state(state, r)["needs_login"]
         results.append(r)
     temp = state_path.with_suffix(".tmp")
@@ -91,7 +122,7 @@ async def main(log: Path, state_path: Path) -> int:
     log.write_text("\n".join(lines[-MAX_LINES:]) + "\n", encoding="utf-8")
     for r in results:
         print(json.dumps(r))
-    return 0 if all(r["status"] in {"ok", "busy"} for r in results) else 1
+    return 0 if all(r["status"] in {"ok", "busy", "in_use"} for r in results) else 1
 
 
 if __name__ == "__main__":

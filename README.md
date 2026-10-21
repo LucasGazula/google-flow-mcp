@@ -199,7 +199,12 @@ pedindo novo login da conta.
 Cada conta usa um worker com Chrome headless residente. Após 3 minutos sem
 pedidos (`FLOW_MCP_WORKER_IDLE_SECONDS`), o Chrome é fechado, liberando memória e
 o perfil para o keepalive; o próximo pedido o reabre em alguns segundos. Uma
-confirmação de upload pendente mantém o Chrome aberto.
+confirmação de upload pendente mantém o Chrome aberto. Além disso, o Chrome fecha
+45 s após a última página (`FLOW_MCP_BROWSER_IDLE_SECONDS`), inclusive durante o
+acompanhamento de um vídeo: parado ele ocupa ~600 MB na Pi. O processo do worker
+sem uso por 20 min (`FLOW_MCP_WORKER_REAP_SECONDS`) também é encerrado e
+reiniciado no próximo pedido. O keepalive não abre contas com geração/upload
+concluído pelo MCP nos últimos 30 min (status `in_use`).
 
 Para caber várias contas na Pi, as páginas de preparo headless não baixam imagens,
 vídeos nem fontes (`FLOW_MCP_LIGHT_PAGES=0` desliga) e no máximo

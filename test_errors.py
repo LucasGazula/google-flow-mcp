@@ -192,6 +192,33 @@ class WorkerErrorTest(unittest.IsolatedAsyncioTestCase):
                 await flow_http.close_workers()
         self.assertEqual(result, {"status": "ok"})
 
+    async def test_idle_worker_of_other_account_is_retired_on_next_request(self):
+        import sys
+        import flow_http
+
+        real_exec = asyncio.create_subprocess_exec
+        script = ("import json,sys\nfor line in sys.stdin:\n"
+                  "    print(json.dumps({'status':'ok','request_id':json.loads(line)['id']}), flush=True)")
+
+        async def fake_exec(*args, **kwargs):
+            return await real_exec(sys.executable, "-c", script, **kwargs)
+
+        with patch("asyncio.create_subprocess_exec", fake_exec):
+            try:
+                await flow_http.run_worker_operation("conta-parada", "credits", {}, None, None)
+                idle = flow_http._workers["conta-parada"]
+                with patch.object(flow_http, "WORKER_REAP_SECONDS", 3600):
+                    await flow_http.run_worker_operation("conta-ativa", "credits", {}, None, None)
+                self.assertIs(flow_http._workers["conta-parada"], idle)  # Dentro do prazo: segue vivo.
+                with patch.object(flow_http, "WORKER_REAP_SECONDS", 0):
+                    await flow_http.run_worker_operation("conta-ativa", "credits", {}, None, None)
+                self.assertNotIn("conta-parada", flow_http._workers)
+                self.assertEqual(idle.returncode, 0)  # Saiu sozinho pelo EOF, sem kill.
+                self.assertEqual((await flow_http.run_worker_operation("conta-parada", "credits", {}, None, None))
+                                 ["status"], "ok")  # Reinicia sob demanda.
+            finally:
+                await flow_http.close_workers()
+
     async def test_busy_account_answers_instead_of_hanging(self):
         import flow_http
 

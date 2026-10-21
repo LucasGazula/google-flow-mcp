@@ -28,6 +28,30 @@ class KeepaliveTest(unittest.IsolatedAsyncioTestCase):
         keepalive.update_state(state, result)
         self.assertTrue(keepalive.update_state(state, result)["needs_login"])
 
+    def test_account_with_recent_mcp_generation_is_not_reopened(self):
+        import json, tempfile, time
+        from datetime import datetime, timezone
+        from pathlib import Path
+        import keepalive
+
+        def at(ago):
+            return datetime.fromtimestamp(time.time() - ago, timezone.utc).isoformat(timespec="seconds")
+
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "operations.jsonl"
+            rows = [{"at": at(60), "account_id": "ddv1", "action": "images", "status": "completed"},
+                    {"at": at(60), "account_id": "ddv2", "action": "images", "status": "failed_pre_submit"},
+                    {"at": at(60), "account_id": "ddv3", "action": "list"},
+                    {"at": at(7200), "account_id": "ddv4", "action": "generate", "status": "completed"},
+                    {"at": at(30), "account_id": "ddv5", "action": "upload_image", "status": "uploaded"}]
+            log.write_text("cortada}\n" + "\n".join(map(json.dumps, rows)) + "\n")
+            self.assertEqual(keepalive.recently_used(log, time.time()), {"ddv1", "ddv5"})
+            self.assertEqual(keepalive.recently_used(Path(root) / "ausente.jsonl", time.time()), set())
+        state = {"ddv1": {"failures": 1, "last_ok": None, "last_fp": None, "rotations": 0}}
+        r = {"at": at(0), "account_id": "ddv1", "status": "in_use", "rotation_fp": None}
+        self.assertFalse(keepalive.update_state(state, r)["needs_login"])
+        self.assertEqual(state["ddv1"]["failures"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

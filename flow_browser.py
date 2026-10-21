@@ -15,6 +15,9 @@ HEAVY_TYPES = {"image", "media", "font"}
 # processo). As demais esperam a vez em vez de levar a Pi ao swap. ponytail: fila por arquivo + polling de 0,5 s.
 PREPARE_SLOTS = max(1, int(os.environ.get("FLOW_MCP_PREPARE_SLOTS", "2")))
 SLOT_WAIT_SECONDS = 300
+# Chrome sem página aberta fecha após estes segundos, mesmo no meio de uma operação longa (acompanhar vídeo,
+# baixar): parado ele ainda ocupa ~600 MB na Pi. Reabrir custa só o início do processo; o preparo navega sempre.
+IDLE_CLOSE_SECONDS = float(os.environ.get("FLOW_MCP_BROWSER_IDLE_SECONDS", "45"))
 
 
 async def _skip_heavy(route):
@@ -60,8 +63,21 @@ class FlowBrowser:
         self.headless = headless
         self.context = None
         self.stack = AsyncExitStack()
+        self.open_pages = 0
+        self.idle_task = None
+        self.gate = asyncio.Lock()  # Abrir página e fechar por ociosidade não se cruzam.
+
+    async def _close_when_idle(self):
+        await asyncio.sleep(IDLE_CLOSE_SECONDS)
+        async with self.gate:
+            if not self.open_pages:
+                self.idle_task = None
+                await self.close()
 
     async def close(self):
+        task, self.idle_task = self.idle_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
         try:
             await self.stack.aclose()
         finally:
@@ -75,6 +91,21 @@ class FlowBrowser:
 
     @asynccontextmanager
     async def _page(self):
+        async with self.gate:
+            if self.idle_task is not None:
+                self.idle_task.cancel()
+                self.idle_task = None
+            page = await self._new_page()
+            self.open_pages += 1
+        try:
+            yield page
+        finally:
+            self.open_pages -= 1
+            await page.close()  # Fecha também rotas e retries do preparo antes do POST HTTP.
+            if not self.open_pages and self.context is not None:
+                self.idle_task = asyncio.create_task(self._close_when_idle())
+
+    async def _new_page(self):
         if self.context is None:
             from flow_accounts import validate_account
             from gflow_cli import auth
@@ -110,11 +141,7 @@ class FlowBrowser:
             except BaseException:
                 await self.close()
                 raise
-        page = await self.context.new_page()
-        try:
-            yield page
-        finally:
-            await page.close()  # Fecha também rotas e retries do preparo antes do POST HTTP.
+        return await self.context.new_page()
 
 
 @asynccontextmanager

@@ -283,6 +283,7 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(opened)
                 self.assertEqual(listeners,{})
             self.assertEqual(page.evaluate.await_count,1)
+            response.text.assert_not_awaited()  # Corpo do Zzl0ze (grande) não é lido; só o as29s precisa.
             self.assertEqual(captured.await_count,2)
             self.assertEqual([c.kwargs["axis"] for c in select.call_args_list],["mode","mode"])
             self.assertEqual([c.args[1:] for c in editor.call_args_list],[(project,),(project,)])
@@ -575,10 +576,10 @@ class FlowHTTPTest(unittest.IsolatedAsyncioTestCase):
 
             # Finalmente resposta com as29s real
             valid_resp = SimpleNamespace(
-                url="https://flow.google.com/_/FlowUi/data/batchexecute",
+                url="https://flow.google.com/_/FlowUi/data/batchexecute?rpcids=as29s",
                 text=AsyncMock(return_value="valid_frames"),
                 request=SimpleNamespace(
-                    url="https://flow.google.com/_/FlowUi/data/batchexecute",
+                    url="https://flow.google.com/_/FlowUi/data/batchexecute?rpcids=as29s",
                     post_data="",
                     headers={},
                 ),

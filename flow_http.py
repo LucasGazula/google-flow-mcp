@@ -192,7 +192,9 @@ class FlowHTTP:
                 await route.abort()
 
         await page.route("**/*", block)
-        await submit.click(timeout=5000)
+        # 20 s: na Pi com várias contas o botão demorava mais de 5 s a ficar clicável (metade das falhas de
+        # preparo). O clique é seguro de esperar: a rota acima bloqueia o envio do navegador.
+        await submit.click(timeout=20000)
         try:
             captured = await asyncio.wait_for(found, 30)
         except asyncio.TimeoutError:
@@ -276,8 +278,11 @@ class FlowHTTP:
                 if "batchexecute" not in response.url:
                     return
                 try:
-                    text = await response.text()
-                    frames = parse_frames(text)
+                    request = response.request
+                    # Só o as29s precisa do corpo da resposta (rpcids na URL ou f.req). Ler todas, inclusive o
+                    # Zzl0ze de projetos grandes, custava CPU na Pi justamente durante o carregamento.
+                    frames = (parse_frames(await response.text())
+                              if "as29s" in request.url + (request.post_data or "") else None)
                 except Exception:
                     return
                 if frames:
@@ -321,8 +326,10 @@ class FlowHTTP:
             page.on("response", observe)
             try:
                 await page.goto(target, wait_until="domcontentloaded", timeout=45000)
-                # Até 60 s pela consulta; a cada 5 s confere se a conta foi mandada para o login.
-                for _ in range(12):
+                # Até 90 s pela consulta (60 s no as29s); a cada 5 s confere se a conta foi mandada para o login.
+                # 90 s: na Pi com várias contas projetos grandes passavam de 60 s, e a falha faz o agente
+                # refazer o preparo inteiro.
+                for _ in range(12 if rpc_id == "as29s" else 18):
                     try:
                         await asyncio.wait_for(asyncio.shield(found), 5)
                         break
@@ -331,7 +338,7 @@ class FlowHTTP:
                 else:
                     if rpc_id == "as29s":
                         raise asyncio.TimeoutError
-                    raise ValueError(f"A página do Flow não fez a consulta {rpc_id} em 60 s (site lento ou "
+                    raise ValueError(f"A página do Flow não fez a consulta {rpc_id} em 90 s (site lento ou "
                                      "interface mudada); nada foi enviado.")
                 captcha = None
                 if captcha_action in {"IMAGE_GENERATION", "VIDEO_GENERATION"}:
@@ -831,20 +838,41 @@ _workers = {}
 _locks = {}
 
 
+async def _retire_worker(account_id, process):
+    """EOF no stdin: o worker fecha o Chrome e sai; mata se não sair em 5 s."""
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+        await asyncio.wait_for(process.wait(), 5)
+    except (asyncio.TimeoutError, OSError):
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    finally:
+        if _workers.get(account_id) is process:
+            _workers.pop(account_id, None)
+
+
 async def close_workers():
     """Encerrar os workers e suas sessões privadas quando o MCP fechar."""
     for account_id, process in list(_workers.items()):
-        try:
-            if process.stdin is not None:
-                process.stdin.close()
-            await asyncio.wait_for(process.wait(), 5)
-        except (asyncio.TimeoutError, OSError):
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-        finally:
-            _workers.pop(account_id, None)
+        await _retire_worker(account_id, process)
     _locks.clear()
+
+
+# Worker sem uso por este tempo é encerrado (~85 MB de Python cada na Pi; ficavam vivos o dia todo). O próximo
+# pedido o reinicia. Perde-se só o que vive na memória dele, como uma confirmação de upload esquecida.
+WORKER_REAP_SECONDS = float(os.environ.get("FLOW_MCP_WORKER_REAP_SECONDS", "1200"))
+_last_used = {}
+
+
+async def _reap_idle_workers(now):
+    for account_id, process in list(_workers.items()):
+        lock = _locks.get(account_id)
+        if (lock is not None and not lock.locked()
+                and now - _last_used.get(account_id, now) > WORKER_REAP_SECONDS):
+            _workers.pop(account_id, None)  # Antes do await: um pedido novo já inicia outro worker.
+            await _retire_worker(account_id, process)
 
 
 # Operações longas (geração + acompanhamento de até 20 min, downloads em lote).
@@ -891,6 +919,7 @@ _running = {}
 async def run_worker_operation(account_id, action, payload, env, root):
     lock = _locks.setdefault(account_id, asyncio.Lock())
     loop = asyncio.get_running_loop()
+    await _reap_idle_workers(loop.time())
     try:
         await asyncio.wait_for(lock.acquire(), BUSY_GRACE_SECONDS)
     except asyncio.TimeoutError:
@@ -903,6 +932,7 @@ async def run_worker_operation(account_id, action, payload, env, root):
         return await _run_locked(account_id, action, payload, env, root)
     finally:
         _running.pop(account_id, None)
+        _last_used[account_id] = loop.time()
         lock.release()
 
 
